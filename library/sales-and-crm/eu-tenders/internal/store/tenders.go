@@ -216,6 +216,27 @@ func (s *Store) SeenLeads(ctx context.Context, keys []LeadKey) (map[LeadKey]bool
 // reports which of them this call claimed. A company already in lead_seen,
 // for example one claimed by a concurrent run since the caller's SeenLeads
 // pre-filter, maps to false, so two runs never both return it.
+// ReleaseLeads removes seen-state rows this process claimed, so a digest
+// that failed before delivering its leads does not hide them from later runs.
+func (s *Store) ReleaseLeads(ctx context.Context, keys []LeadKey) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	s.lockForWrite()
+	defer s.unlockAfterWrite()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, k := range keys {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lead_seen WHERE name_key=? AND country=?`, k.NameKey, k.Country); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ClaimLeads(ctx context.Context, keys []LeadKey) (map[LeadKey]bool, error) {
 	out := make(map[LeadKey]bool, len(keys))
 	if len(keys) == 0 {

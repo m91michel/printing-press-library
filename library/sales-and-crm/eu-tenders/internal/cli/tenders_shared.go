@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -98,11 +99,34 @@ func tedSearch(ctx context.Context, flags *rootFlags, req ted.SearchRequest) (te
 	if err != nil {
 		return ted.SearchResponse{}, err
 	}
-	data, _, err := c.PostQueryWithParams(ctx, ted.SearchPath, nil, req)
-	if err != nil {
-		return ted.SearchResponse{}, classifyAPIErrorOnly(err)
+	for attempt := 0; ; attempt++ {
+		data, _, err := c.PostQueryWithParams(ctx, ted.SearchPath, nil, req)
+		if err == nil {
+			return ted.ParseSearchResponse(data)
+		}
+		classified := classifyAPIErrorOnly(err)
+		wait, retry := tedRateLimitBackoff(classified, attempt)
+		if !retry {
+			return ted.SearchResponse{}, classified
+		}
+		select {
+		case <-ctx.Done():
+			return ted.SearchResponse{}, classified
+		case <-time.After(wait):
+		}
 	}
-	return ted.ParseSearchResponse(data)
+}
+
+// tedRateLimitBackoff extends the client's own 429 handling for TED, which
+// throttles bursts per caller without a Retry-After header: a rate-limited
+// search waits 5s, 10s, then 20s before the error reaches the user. The
+// command context (--timeout) still bounds the total wait.
+func tedRateLimitBackoff(err error, attempt int) (time.Duration, bool) {
+	var ce *cliError
+	if !errors.As(err, &ce) || ce.code != 7 || attempt >= 3 {
+		return 0, false
+	}
+	return time.Duration(5<<attempt) * time.Second, true
 }
 
 // pageTED walks TED results with ITERATION pagination, handing each page to

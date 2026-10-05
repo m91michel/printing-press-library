@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/cliutil"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/cliutil/testenv"
@@ -440,18 +442,57 @@ func TestClaimUpToRefillsSlotsLostToConcurrentRuns(t *testing.T) {
 	}
 	cmd := RootCmd()
 	cmd.SetContext(context.Background())
-	got, lost, err := claimUpTo(cmd, db, rows, 2, func(l leadRow) store.LeadKey { return leadStoreKey(l.WinnerName, l.WinnerCountry) })
+	got, lost, _, err := claimUpTo(cmd, db, rows, 2, func(l leadRow) store.LeadKey { return leadStoreKey(l.WinnerName, l.WinnerCountry) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lost != 2 || len(got) != 2 || got[0].WinnerName != "C GmbH" || got[1].WinnerName != "C GmbH" {
 		t.Fatalf("want both C rows after refilling past A and B, got lost=%d rows=%+v", lost, got)
 	}
-	got, _, err = claimUpTo(cmd, db, rows, 0, func(l leadRow) store.LeadKey { return leadStoreKey(l.WinnerName, l.WinnerCountry) })
+	got, _, _, err = claimUpTo(cmd, db, rows, 0, func(l leadRow) store.LeadKey { return leadStoreKey(l.WinnerName, l.WinnerCountry) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].WinnerName != "D GmbH" {
 		t.Fatalf("second run should get only D, got %+v", got)
+	}
+}
+
+func TestClaimUpToReleaseGivesBackUndeliveredLeads(t *testing.T) {
+	testenv.Isolate(t)
+	db := seedTendersDB(t, nil)
+	rows := []leadRow{{WinnerName: "A GmbH", WinnerCountry: "DEU"}, {WinnerName: "B GmbH", WinnerCountry: "DEU"}}
+	cmd := RootCmd()
+	cmd.SetContext(context.Background())
+	keyOf := func(l leadRow) store.LeadKey { return leadStoreKey(l.WinnerName, l.WinnerCountry) }
+	got, _, release, err := claimUpTo(cmd, db, rows, 0, keyOf)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("first claim: %v %+v", err, got)
+	}
+	// The digest failed before output: its claims must be given back.
+	release()
+	again, _, _, err := claimUpTo(cmd, db, rows, 0, keyOf)
+	if err != nil || len(again) != 2 {
+		t.Fatalf("released companies must be claimable again, got %v %+v", err, again)
+	}
+}
+
+func TestTEDRateLimitBackoff(t *testing.T) {
+	cases := []struct {
+		err     error
+		attempt int
+		wait    time.Duration
+		retry   bool
+	}{
+		{rateLimitErr(errors.New("HTTP 429")), 0, 5 * time.Second, true},
+		{rateLimitErr(errors.New("HTTP 429")), 2, 20 * time.Second, true},
+		{rateLimitErr(errors.New("HTTP 429")), 3, 0, false},
+		{apiErr(errors.New("HTTP 500")), 0, 0, false},
+	}
+	for _, c := range cases {
+		wait, retry := tedRateLimitBackoff(c.err, c.attempt)
+		if wait != c.wait || retry != c.retry {
+			t.Errorf("attempt %d %v: got %v/%v want %v/%v", c.attempt, c.err, wait, retry, c.wait, c.retry)
+		}
 	}
 }

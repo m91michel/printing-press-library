@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -109,11 +110,20 @@ never return the same company twice.`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %d leads already returned by earlier --new-only runs\n", skipped)
 			}
 
+			// release gives back --new-only claims when the leads never reach
+			// the output, so a failed digest does not hide them from later runs.
+			release := func() {}
+			deliver := func(err error) error {
+				if err != nil {
+					release()
+				}
+				return err
+			}
 			if groupBy == "company" {
 				grouped := groupLeadsByCompany(leads)
 				if newOnly {
 					var lost int
-					grouped, lost, err = claimUpTo(cmd, resolveTendersDB(dbPath), grouped, limit, func(c companyLead) store.LeadKey {
+					grouped, lost, release, err = claimUpTo(cmd, resolveTendersDB(dbPath), grouped, limit, func(c companyLead) store.LeadKey {
 						return leadStoreKey(c.WinnerName, c.WinnerCountry)
 					})
 					if err != nil {
@@ -124,7 +134,7 @@ never return the same company twice.`,
 					grouped = grouped[:limit]
 				}
 				if !wantsHumanTable(cmd.OutOrStdout(), flags) {
-					return printJSONFiltered(cmd.OutOrStdout(), grouped, flags)
+					return deliver(printJSONFiltered(cmd.OutOrStdout(), grouped, flags))
 				}
 				if len(grouped) == 0 {
 					fmt.Fprintln(cmd.OutOrStdout(), "No matching award winners.")
@@ -135,11 +145,11 @@ never return the same company twice.`,
 				for _, c := range grouped {
 					fmt.Fprintf(tw, "%s\t%s\t%d\t%.0f %s\t%s\t%s\t%s\n", truncate(c.WinnerName, 40), c.WinnerCity, c.Wins, c.TotalValue, c.Currency, c.WinnerEmail, c.WinnerPhone, c.LatestWin)
 				}
-				return tw.Flush()
+				return deliver(tw.Flush())
 			}
 			if newOnly {
 				var lost int
-				leads, lost, err = claimUpTo(cmd, resolveTendersDB(dbPath), leads, limit, func(l leadRow) store.LeadKey {
+				leads, lost, release, err = claimUpTo(cmd, resolveTendersDB(dbPath), leads, limit, func(l leadRow) store.LeadKey {
 					return leadStoreKey(l.WinnerName, l.WinnerCountry)
 				})
 				if err != nil {
@@ -150,7 +160,7 @@ never return the same company twice.`,
 				leads = leads[:limit]
 			}
 			if !wantsHumanTable(cmd.OutOrStdout(), flags) {
-				return printJSONFiltered(cmd.OutOrStdout(), leads, flags)
+				return deliver(printJSONFiltered(cmd.OutOrStdout(), leads, flags))
 			}
 			if len(leads) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No matching award winners. Widen --days, drop --keywords, or run sync.")
@@ -161,7 +171,7 @@ never return the same company twice.`,
 			for _, l := range leads {
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%.0f\t%s\t%s\t%s\n", l.PublishedDate, truncate(l.WinnerName, 36), l.WinnerCity, l.ContractValue, l.WinnerEmail, l.WinnerPhone, truncate(l.Title, 50))
 			}
-			return tw.Flush()
+			return deliver(tw.Flush())
 		},
 	}
 	cmd.Flags().StringVar(&country, "country", "", "Buyer country, 3-letter ISO code (e.g. DEU)")
@@ -215,14 +225,15 @@ func dropSeenLeads(cmd *cobra.Command, dbPath string, leads []leadRow) ([]leadRo
 // freed slots are refilled from the next candidates, so concurrent digests
 // split the companies without under-filling each other. Rows of a company
 // this run already claimed are kept without a second claim.
-func claimUpTo[T any](cmd *cobra.Command, dbPath string, candidates []T, limit int, key func(T) store.LeadKey) ([]T, int, error) {
+func claimUpTo[T any](cmd *cobra.Command, dbPath string, candidates []T, limit int, key func(T) store.LeadKey) ([]T, int, func(), error) {
 	st, err := store.OpenWithContext(cmd.Context(), dbPath)
 	if err != nil {
-		return nil, 0, fmt.Errorf("opening local store for --new-only: %w", err)
+		return nil, 0, func() {}, fmt.Errorf("opening local store for --new-only: %w", err)
 	}
 	defer st.Close()
 	kept := make([]T, 0, len(candidates))
 	mine := map[store.LeadKey]bool{}
+	release := func() { releaseClaims(dbPath, mine) }
 	lostKeys := map[store.LeadKey]bool{}
 	next := 0
 	for next < len(candidates) && (limit <= 0 || len(kept) < limit) {
@@ -240,7 +251,8 @@ func claimUpTo[T any](cmd *cobra.Command, dbPath string, candidates []T, limit i
 		}
 		claimed, err := st.ClaimLeads(cmd.Context(), toClaim)
 		if err != nil {
-			return nil, 0, fmt.Errorf("recording lead seen-state: %w", err)
+			release()
+			return nil, 0, func() {}, fmt.Errorf("recording lead seen-state: %w", err)
 		}
 		for _, k := range toClaim {
 			if claimed[k] {
@@ -255,7 +267,28 @@ func claimUpTo[T any](cmd *cobra.Command, dbPath string, candidates []T, limit i
 			}
 		}
 	}
-	return kept, len(lostKeys), nil
+	return kept, len(lostKeys), release, nil
+}
+
+// releaseClaims gives back every company this run claimed. It opens its own
+// handle with a fresh context because the command context may already be
+// cancelled when a digest fails.
+func releaseClaims(dbPath string, mine map[store.LeadKey]bool) {
+	if len(mine) == 0 {
+		return
+	}
+	keys := make([]store.LeadKey, 0, len(mine))
+	for k := range mine {
+		keys = append(keys, k)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, err := store.OpenWithContext(ctx, dbPath)
+	if err != nil {
+		return
+	}
+	defer st.Close()
+	_ = st.ReleaseLeads(ctx, keys)
 }
 
 func noteConcurrentClaims(cmd *cobra.Command, n int) {
