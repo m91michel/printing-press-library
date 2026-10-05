@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -110,11 +111,14 @@ never return the same company twice.`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %d leads already returned by earlier --new-only runs\n", skipped)
 			}
 
-			// release gives back --new-only claims when the leads never reach
-			// the output, so a failed digest does not hide them from later runs.
+			// release gives back --new-only claims when no lead reached the
+			// output, so a failed digest does not hide them from later runs.
+			// Once any byte was written (e.g. a --select miss reported after
+			// printing), the leads count as delivered and stay claimed.
 			release := func() {}
+			out := &countingWriter{w: cmd.OutOrStdout()}
 			deliver := func(err error) error {
-				if err != nil {
+				if err != nil && out.n == 0 {
 					release()
 				}
 				return err
@@ -134,13 +138,13 @@ never return the same company twice.`,
 					grouped = grouped[:limit]
 				}
 				if !wantsHumanTable(cmd.OutOrStdout(), flags) {
-					return deliver(printJSONFiltered(cmd.OutOrStdout(), grouped, flags))
+					return deliver(printJSONFiltered(out, grouped, flags))
 				}
 				if len(grouped) == 0 {
-					fmt.Fprintln(cmd.OutOrStdout(), "No matching award winners.")
+					fmt.Fprintln(out, "No matching award winners.")
 					return nil
 				}
-				tw := newTabWriter(cmd.OutOrStdout())
+				tw := newTabWriter(out)
 				fmt.Fprintln(tw, "COMPANY\tCITY\tWINS\tTOTAL VALUE\tEMAIL\tPHONE\tLATEST")
 				for _, c := range grouped {
 					fmt.Fprintf(tw, "%s\t%s\t%d\t%.0f %s\t%s\t%s\t%s\n", truncate(c.WinnerName, 40), c.WinnerCity, c.Wins, c.TotalValue, c.Currency, c.WinnerEmail, c.WinnerPhone, c.LatestWin)
@@ -160,13 +164,13 @@ never return the same company twice.`,
 				leads = leads[:limit]
 			}
 			if !wantsHumanTable(cmd.OutOrStdout(), flags) {
-				return deliver(printJSONFiltered(cmd.OutOrStdout(), leads, flags))
+				return deliver(printJSONFiltered(out, leads, flags))
 			}
 			if len(leads) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No matching award winners. Widen --days, drop --keywords, or run sync.")
+				fmt.Fprintln(out, "No matching award winners. Widen --days, drop --keywords, or run sync.")
 				return nil
 			}
-			tw := newTabWriter(cmd.OutOrStdout())
+			tw := newTabWriter(out)
 			fmt.Fprintln(tw, "DATE\tCOMPANY\tCITY\tVALUE\tEMAIL\tPHONE\tPROJECT")
 			for _, l := range leads {
 				fmt.Fprintf(tw, "%s\t%s\t%s\t%.0f\t%s\t%s\t%s\n", l.PublishedDate, truncate(l.WinnerName, 36), l.WinnerCity, l.ContractValue, l.WinnerEmail, l.WinnerPhone, truncate(l.Title, 50))
@@ -217,6 +221,18 @@ func dropSeenLeads(cmd *cobra.Command, dbPath string, leads []leadRow) ([]leadRo
 		out = append(out, l)
 	}
 	return out, skipped, nil
+}
+
+// countingWriter records how many bytes reached the output.
+type countingWriter struct {
+	w io.Writer
+	n int
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += n
+	return n, err
 }
 
 // claimUpTo walks the unseen candidates in order and claims their companies

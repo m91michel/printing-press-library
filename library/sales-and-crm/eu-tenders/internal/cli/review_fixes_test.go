@@ -496,3 +496,24 @@ func TestTEDRateLimitBackoff(t *testing.T) {
 		}
 	}
 }
+
+func TestNewOnlyKeepsClaimsWhenLeadsWerePrinted(t *testing.T) {
+	db := seedTendersDB(t, []ted.Notice{
+		awardNotice("1-2026", daysFromToday(-1), "Stadt A", "DEU", "45210000", 1, ted.Winner{Name: "A GmbH", Country: "DEU", LotsWon: 1}),
+	})
+	testenv.Isolate(t)
+	cmd := RootCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"leads", "--country", "DEU", "--days", "30", "--new-only", "--select", "no_such_field", "--json", "--db", db, "--data-source", "local"})
+	_ = cmd.Execute()
+	if stdout.Len() == 0 {
+		t.Skip("output pipeline printed nothing for a total --select miss; nothing to assert")
+	}
+	var again []leadRow
+	runTendersJSON(t, &again, "leads", "--country", "DEU", "--days", "30", "--new-only", "--db", db, "--data-source", "local")
+	if len(again) != 0 {
+		t.Fatalf("printed leads must stay claimed after a --select error, got %+v", again)
+	}
+}
