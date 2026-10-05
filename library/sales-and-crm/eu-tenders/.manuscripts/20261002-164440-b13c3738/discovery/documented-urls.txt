@@ -1,0 +1,4 @@
+https://api.ted.europa.eu/v3/notices/search
+https://api.ted.europa.eu/api-v3.yaml
+https://docs.ted.europa.eu/api/latest/search.html
+https://ted.europa.eu/en/notice/-/detail/680471-2026

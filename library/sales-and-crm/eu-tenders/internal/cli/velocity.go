@@ -1,290 +1,248 @@
 // Copyright 2026 Mathias Michel and contributors. Licensed under Apache-2.0. See LICENSE.
+// pp:data-source local
 
 package cli
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/store"
-
 	"github.com/spf13/cobra"
+
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/store"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/ted"
 )
 
-func newVelocityCmd(flags *rootFlags) *cobra.Command {
-	var (
-		cpv     string
-		country string
-		window  string
-		compare string
-		dbPath  string
-	)
+type velocityWeek struct {
+	WeekStart string `json:"week_start"`
+	Calls     int    `json:"calls"`
+	Awards    int    `json:"awards"`
+}
+
+type velocityCompare struct {
+	Since           string   `json:"since"`
+	Until           string   `json:"until"`
+	TotalCalls      int      `json:"total_calls"`
+	TotalAwards     int      `json:"total_awards"`
+	ChangeCallsPct  *float64 `json:"change_calls_pct"`
+	ChangeAwardsPct *float64 `json:"change_awards_pct"`
+}
+
+type velocityResult struct {
+	Window      string           `json:"window"`
+	Since       string           `json:"since"`
+	Until       string           `json:"until"`
+	Weeks       []velocityWeek   `json:"weeks"`
+	TotalCalls  int              `json:"total_calls"`
+	TotalAwards int              `json:"total_awards"`
+	Compare     *velocityCompare `json:"compare"`
+	Trend       velocityTrend    `json:"trend"`
+}
+
+type datedNotice struct {
+	date       string
+	noticeType string
+}
+
+// velocityNotices returns publication dates and types of calls and awards in [since, until].
+func velocityNotices(ctx context.Context, st *store.Store, country, cpv, since, until string) ([]datedNotice, error) {
+	f := &noticeFilterSQL{}
+	f.add("notice_type IN (?, ?)", ted.NoticeTypeCall, ted.NoticeTypeAward)
+	f.add("publication_date >= ?", since)
+	f.add("publication_date <= ?", until)
+	f.country("buyer_country", country)
+	f.cpv("cpv_code", cpv)
+	rows, err := st.DB().QueryContext(ctx, `SELECT publication_date, notice_type FROM notices`+f.where(), f.args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying notice velocity: %w", err)
+	}
+	out := make([]datedNotice, 0)
+	for rows.Next() {
+		var d datedNotice
+		if err := rows.Scan(&d.date, &d.noticeType); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return out, rows.Close()
+}
+
+func countByType(ns []datedNotice) (calls, awards int) {
+	for _, n := range ns {
+		if n.noticeType == ted.NoticeTypeCall {
+			calls++
+		} else {
+			awards++
+		}
+	}
+	return calls, awards
+}
+
+// buildVelocity buckets notices into Monday-start weeks covering [since, today],
+// including weeks with no notices, and labels the trend by comparing the
+// second half of the window with the first half.
+func buildVelocity(window string, since, today time.Time, ns []datedNotice) velocityResult {
+	res := velocityResult{
+		Window: window,
+		Since:  since.Format("2006-01-02"),
+		Until:  today.Format("2006-01-02"),
+		Weeks:  make([]velocityWeek, 0),
+	}
+	idx := map[string]int{}
+	for w := weekStart(since); !w.After(today); w = w.AddDate(0, 0, 7) {
+		key := w.Format("2006-01-02")
+		idx[key] = len(res.Weeks)
+		res.Weeks = append(res.Weeks, velocityWeek{WeekStart: key})
+	}
+	mid := since.Add(today.Sub(since) / 2).Format("2006-01-02")
+	var first, second float64
+	for _, n := range ns {
+		d, err := time.Parse("2006-01-02", n.date)
+		if err != nil {
+			continue
+		}
+		i, ok := idx[weekStart(d).Format("2006-01-02")]
+		if !ok {
+			continue
+		}
+		if n.noticeType == ted.NoticeTypeCall {
+			res.Weeks[i].Calls++
+			res.TotalCalls++
+		} else {
+			res.Weeks[i].Awards++
+			res.TotalAwards++
+		}
+		if n.date < mid {
+			first++
+		} else {
+			second++
+		}
+	}
+	res.Trend = trendLabel(first, second)
+	return res
+}
+
+func newNovelVelocityCmd(flags *rootFlags) *cobra.Command {
+	var country, cpv, window, compare, dbPath string
 
 	cmd := &cobra.Command{
 		Use:   "velocity",
-		Short: "Weekly procurement volume trend — see if a market is heating up or cooling",
-		Long: `Show weekly notice counts (calls and awards) over a rolling window.
-Use --window to specify the lookback: 30d, 90d, 180d, 365d.
+		Short: "See whether a procurement market is heating up or cooling off with weekly notice counts versus the same window last year",
+		Long: `See whether a procurement market is heating up or cooling off: weekly counts of calls for tender and awards over a rolling window, optionally compared with the same window a year earlier.
 
-With --human-friendly: renders an ASCII sparkline.
+Weeks start on Monday and every week in the window is listed, including
+weeks with no notices. trend compares notices published in the second half
+of the window with the first half: above +10% is "heating", below -10% is
+"cooling", otherwise "flat"; "no_data" when the window holds no
+notices at all. --compare 1y shifts the same window back one
+year and reports totals plus percent change (null when the earlier window
+had no notices). Reads the local store only; run sync first.
 
-Examples:
-  eu-tenders-pp-cli velocity --country DEU --cpv 72 --window 180d
-  eu-tenders-pp-cli velocity --cpv 45 --country FRA --human-friendly`,
+Output fields: window, since, until, weeks[{week_start, calls, awards}],
+total_calls, total_awards, compare (or null), trend.`,
+		Example: strings.Trim(`
+  eu-tenders-pp-cli velocity --country DEU --cpv 45 --window 90d --compare 1y --agent
+  eu-tenders-pp-cli velocity --country FRA --cpv 72 --window 12w --json
+  eu-tenders-pp-cli velocity --country DEU --window 30d --human-friendly`, "\n"),
 		Annotations: map[string]string{
-			"mcp:read-only": "true",
+			"mcp:read-only":  "true",
+			"pp:data-source": "local",
+			"pp:happy-args":  "--country=DEU;--cpv=45;--window=30d",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if dryRunOK(flags) {
-				return nil
+			if len(args) == 0 && cmd.Flags().NFlag() == 0 {
+				return cmd.Help()
 			}
-
-			st, err := store.Open(dbPath)
+			if dryRunOK(flags) {
+				return writeDryRun(cmd.OutOrStdout(), flags, "count weekly notice velocity")
+			}
+			if err := requireLocalSource(flags); err != nil {
+				return err
+			}
+			if err := validateTEDFilters(country, cpv); err != nil {
+				return err
+			}
+			win, err := parseWindow("window", window)
 			if err != nil {
-				return fmt.Errorf("open store: %w", err)
+				return usageErr(err)
+			}
+			var shift time.Duration
+			if strings.TrimSpace(compare) != "" {
+				if shift, err = parseWindow("compare", compare); err != nil {
+					return usageErr(err)
+				}
+			}
+			dbPath = resolveTendersDB(dbPath)
+			now := time.Now().UTC()
+			today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+			since := today.Add(-win)
+			st, stop, err := openLocalMirror(cmd, flags, dbPath, buildVelocity(window, since, today, nil))
+			if stop {
+				return err
 			}
 			defer st.Close()
+			hintIfNoNotices(cmd, st, "")
 
-			count, _ := st.Count()
-			if count == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No notices synced yet. Run: eu-tenders-pp-cli sync --country %s --cpv %s --since %s\n",
-					orDefault(country, "DEU"), orDefault(cpv, "72000000"), time.Now().AddDate(-1, 0, 0).Format("2006-01-02"))
-				return nil
-			}
-
-			// Parse window like "90d" → "-90 days"
-			sqlInterval, err := parseWindowInterval(window)
+			ns, err := velocityNotices(cmd.Context(), st, country, cpv, since.Format("2006-01-02"), today.Format("2006-01-02"))
 			if err != nil {
-				return fmt.Errorf("invalid --window %q: use e.g. 30d, 90d, 180d, 365d", window)
+				return err
 			}
-
-			cpvPat := normalizeCPVLike(orDefault(cpv, ""))
-			countryUpper := strings.ToUpper(country)
-
-			q := `SELECT strftime('%Y-W%W', publication_date) as week,
-				COUNT(*) as total,
-				SUM(CASE WHEN notice_type='cn-standard' THEN 1 ELSE 0 END) as calls,
-				SUM(CASE WHEN notice_type='can-standard' THEN 1 ELSE 0 END) as awards
-				FROM notices
-				WHERE publication_date >= date('now', ?)`
-			params := []interface{}{sqlInterval}
-
-			if countryUpper != "" {
-				q += " AND buyer_country=?"
-				params = append(params, countryUpper)
-			}
-			if cpvPat != "%" && cpvPat != "" {
-				q += " AND cpv_code LIKE ?"
-				params = append(params, cpvPat)
-			}
-
-			q += " GROUP BY week ORDER BY week"
-
-			rows, err := st.DB().Query(q, params...)
-			if err != nil {
-				return fmt.Errorf("query: %w", err)
-			}
-			defer rows.Close()
-
-			type weekRow struct {
-				Week   string `json:"week"`
-				Total  int    `json:"total"`
-				Calls  int    `json:"calls"`
-				Awards int    `json:"awards"`
-			}
-
-			var results []weekRow
-			for rows.Next() {
-				var r weekRow
-				if err := rows.Scan(&r.Week, &r.Total, &r.Calls, &r.Awards); err != nil {
-					continue
-				}
-				results = append(results, r)
-			}
-
-			// --compare: query the prior period (same duration, shifted back).
-			var priorResults []weekRow
-			if compare != "" {
-				shift, err := parseCompareShift(compare)
+			res := buildVelocity(window, since, today, ns)
+			if shift > 0 {
+				cs, cu := since.Add(-shift).Format("2006-01-02"), today.Add(-shift).Format("2006-01-02")
+				prev, err := velocityNotices(cmd.Context(), st, country, cpv, cs, cu)
 				if err != nil {
-					return fmt.Errorf("invalid --compare %q: use e.g. 1y, 90d", compare)
+					return err
 				}
-				pq := `SELECT strftime('%Y-W%W', publication_date) as week,
-					COUNT(*) as total,
-					SUM(CASE WHEN notice_type='cn-standard' THEN 1 ELSE 0 END) as calls,
-					SUM(CASE WHEN notice_type='can-standard' THEN 1 ELSE 0 END) as awards
-					FROM notices
-					WHERE publication_date >= date('now', ?, ?)
-					  AND publication_date < date('now', ?)`
-				pparams := []interface{}{shift, sqlInterval, shift}
-				if countryUpper != "" {
-					pq += " AND buyer_country=?"
-					pparams = append(pparams, countryUpper)
-				}
-				if cpvPat != "%" && cpvPat != "" {
-					pq += " AND cpv_code LIKE ?"
-					pparams = append(pparams, cpvPat)
-				}
-				pq += " GROUP BY week ORDER BY week"
-				prows, err := st.DB().Query(pq, pparams...)
-				if err != nil {
-					return fmt.Errorf("query prior period: %w", err)
-				}
-				defer prows.Close()
-				for prows.Next() {
-					var r weekRow
-					if err := prows.Scan(&r.Week, &r.Total, &r.Calls, &r.Awards); err != nil {
-						continue
-					}
-					priorResults = append(priorResults, r)
+				pc, pa := countByType(prev)
+				res.Compare = &velocityCompare{
+					Since: cs, Until: cu, TotalCalls: pc, TotalAwards: pa,
+					ChangeCallsPct:  pctChange(float64(res.TotalCalls), float64(pc)),
+					ChangeAwardsPct: pctChange(float64(res.TotalAwards), float64(pa)),
 				}
 			}
-
-			if flags.asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				if compare != "" {
-					return enc.Encode(map[string]interface{}{
-						"current": results,
-						"prior":   priorResults,
-					})
-				}
-				return enc.Encode(results)
+			if !wantsHumanTable(cmd.OutOrStdout(), flags) {
+				return printJSONFiltered(cmd.OutOrStdout(), res, flags)
 			}
-
-			if len(results) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No data found for the given window\n")
-				return nil
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "%s to %s (%s): %d calls, %d awards, trend %s\n", res.Since, res.Until, res.Window, res.TotalCalls, res.TotalAwards, res.Trend)
+			if humanFriendly {
+				totals := make([]int, len(res.Weeks))
+				for i, wk := range res.Weeks {
+					totals[i] = wk.Calls + wk.Awards
+				}
+				fmt.Fprintf(w, "weekly notices %s\n", sparkline(totals))
 			}
-
-			tw := newTabWriter(cmd.OutOrStdout())
-			if compare != "" {
-				fmt.Fprintln(tw, "WEEK\tCALLS\tAWARDS\tTOTAL\tPRIOR WEEK\tPRIOR CALLS\tPRIOR AWARDS\tPRIOR TOTAL")
-				// Pair by week-number suffix (e.g. "W08") rather than array
-				// index — when either window has zero-notice weeks the
-				// GROUP BY drops them and index-pairing silently aligns
-				// different calendar weeks side-by-side.
-				priorByWeek := make(map[string]weekRow, len(priorResults))
-				for _, p := range priorResults {
-					priorByWeek[weekSuffix(p.Week)] = p
-				}
-				matched := make(map[string]bool, len(priorResults))
-				for _, cur := range results {
-					if pri, ok := priorByWeek[weekSuffix(cur.Week)]; ok {
-						matched[weekSuffix(cur.Week)] = true
-						fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\t%d\t%d\t%d\n",
-							cur.Week, cur.Calls, cur.Awards, cur.Total,
-							pri.Week, pri.Calls, pri.Awards, pri.Total)
-					} else {
-						fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t-\t-\t-\t-\n",
-							cur.Week, cur.Calls, cur.Awards, cur.Total)
-					}
-				}
-				for _, pri := range priorResults {
-					if matched[weekSuffix(pri.Week)] {
-						continue
-					}
-					fmt.Fprintf(tw, "-\t-\t-\t-\t%s\t%d\t%d\t%d\n",
-						pri.Week, pri.Calls, pri.Awards, pri.Total)
-				}
-			} else if humanFriendly {
-				fmt.Fprintln(tw, "WEEK\tCALLS\tAWARDS\tTOTAL\tSPARKLINE")
-				totals := make([]int, len(results))
-				for i, r := range results {
-					totals[i] = r.Total
-				}
-				spark := sparkline(totals)
-				for i, r := range results {
-					fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\n", r.Week, r.Calls, r.Awards, r.Total, string(spark[i]))
-				}
-			} else {
-				fmt.Fprintln(tw, "WEEK\tCALLS\tAWARDS\tTOTAL")
-				for _, r := range results {
-					fmt.Fprintf(tw, "%s\t%d\t%d\t%d\n", r.Week, r.Calls, r.Awards, r.Total)
-				}
+			if res.Compare != nil {
+				fmt.Fprintf(w, "compare %s to %s: %d calls (%s), %d awards (%s)\n", res.Compare.Since, res.Compare.Until,
+					res.Compare.TotalCalls, fmtPct(res.Compare.ChangeCallsPct), res.Compare.TotalAwards, fmtPct(res.Compare.ChangeAwardsPct))
+			}
+			tw := newTabWriter(w)
+			fmt.Fprintln(tw, "WEEK\tCALLS\tAWARDS")
+			for _, wk := range res.Weeks {
+				fmt.Fprintf(tw, "%s\t%d\t%d\n", wk.WeekStart, wk.Calls, wk.Awards)
 			}
 			return tw.Flush()
 		},
 	}
-
-	cmd.Flags().StringVar(&cpv, "cpv", "", "CPV code prefix filter")
-	cmd.Flags().StringVar(&country, "country", "", "Buyer country 3-letter ISO code")
-	cmd.Flags().StringVar(&window, "window", "90d", "Lookback window (e.g. 30d, 90d, 180d, 365d)")
-	cmd.Flags().StringVar(&compare, "compare", "", "Compare against a prior period of the same length (e.g. 1y for same window one year ago)")
-	cmd.Flags().StringVar(&dbPath, "db", defaultDBPath(), "SQLite database path")
-
+	cmd.Flags().StringVar(&country, "country", "", "Buyer country, 3-letter ISO code (e.g. DEU)")
+	cmd.Flags().StringVar(&cpv, "cpv", "", "CPV code or prefix (e.g. 45 for construction, 72 for IT services)")
+	cmd.Flags().StringVar(&window, "window", "90d", "Rolling window ending today (e.g. 30d, 12w, 1y)")
+	cmd.Flags().StringVar(&compare, "compare", "", "Also count the same window shifted back by this duration (e.g. 1y); empty skips the comparison")
+	cmd.Flags().StringVar(&dbPath, "db", "", "SQLite database path (default: the CLI data directory)")
 	return cmd
 }
 
-// parseWindowInterval converts "90d" → "-90 days" for use in SQLite date().
-func parseWindowInterval(w string) (string, error) {
-	w = strings.TrimSpace(strings.ToLower(w))
-	if strings.HasSuffix(w, "d") {
-		n := strings.TrimSuffix(w, "d")
-		if n == "" {
-			return "", fmt.Errorf("empty number")
-		}
-		if _, err := strconv.Atoi(n); err != nil {
-			return "", fmt.Errorf("non-numeric value %q", n)
-		}
-		return fmt.Sprintf("-%s days", n), nil
+func fmtPct(p *float64) string {
+	if p == nil {
+		return "n/a"
 	}
-	return "", fmt.Errorf("unsupported format")
-}
-
-// parseCompareShift converts "1y" → "-1 years" or "90d" → "-90 days" for SQLite date().
-func parseCompareShift(s string) (string, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if strings.HasSuffix(s, "y") {
-		n := strings.TrimSuffix(s, "y")
-		if n == "" {
-			return "", fmt.Errorf("empty number")
-		}
-		if _, err := strconv.Atoi(n); err != nil {
-			return "", fmt.Errorf("non-numeric value %q", n)
-		}
-		return fmt.Sprintf("-%s years", n), nil
-	}
-	return parseWindowInterval(s)
-}
-
-// sparkline converts a slice of ints to Unicode block characters.
-// weekSuffix returns the W## portion of a YYYY-W## week label so
-// --compare can pair current and prior rows by calendar week instead
-// of array index.
-func weekSuffix(week string) string {
-	if i := strings.Index(week, "-W"); i >= 0 {
-		return week[i+1:]
-	}
-	return week
-}
-
-var sparkChars = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-
-func sparkline(vals []int) []rune {
-	if len(vals) == 0 {
-		return nil
-	}
-	maxVal := 0
-	for _, v := range vals {
-		if v > maxVal {
-			maxVal = v
-		}
-	}
-	out := make([]rune, len(vals))
-	for i, v := range vals {
-		if maxVal == 0 {
-			out[i] = sparkChars[0]
-			continue
-		}
-		idx := int(float64(v) / float64(maxVal) * float64(len(sparkChars)-1))
-		if idx >= len(sparkChars) {
-			idx = len(sparkChars) - 1
-		}
-		out[i] = sparkChars[idx]
-	}
-	return out
+	return fmt.Sprintf("%+.1f%%", *p)
 }

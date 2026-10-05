@@ -1,0 +1,8 @@
+# Root-anchored so cmd/<binary>/ source stays tracked.
+/eu-tenders-pp-cli
+/eu-tenders-pp-cli.exe
+/eu-tenders-pp-mcp
+/eu-tenders-pp-mcp.exe
+/bin/
+/build/
+/dist/

@@ -1,168 +1,141 @@
 // Copyright 2026 Mathias Michel and contributors. Licensed under Apache-2.0. See LICENSE.
+// pp:data-source local
 
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/store"
-
 	"github.com/spf13/cobra"
 )
 
-func newDarkBuyersCmd(flags *rootFlags) *cobra.Command {
-	var (
-		cpv      string
-		country  string
-		minCalls int
-		since    string
-		dbPath   string
-	)
+const (
+	darkReasonLowAwardRate = "low_award_rate"
+	darkReasonSingleWinner = "single_winner"
+	darkBuyerNote          = "heuristic signal, not a finding"
+)
+
+type darkBuyer struct {
+	BuyerName     string   `json:"buyer_name"`
+	BuyerCountry  string   `json:"buyer_country"`
+	Calls         int      `json:"calls"`
+	Awards        int      `json:"awards"`
+	AwardRate     float64  `json:"award_rate"`
+	UniqueWinners int      `json:"unique_winners"`
+	TopWinner     string   `json:"top_winner"`
+	Reasons       []string `json:"reasons"`
+	Note          string   `json:"note"`
+}
+
+// flagDarkBuyers keeps buyers whose award rate is at or below maxRate, or
+// whose three or more awards all went to one company.
+func flagDarkBuyers(stats []buyerAwardStat, maxRate float64) []darkBuyer {
+	out := make([]darkBuyer, 0)
+	for _, b := range stats {
+		reasons := make([]string, 0, 2)
+		if float64(b.Awards) <= maxRate*float64(b.Calls) {
+			reasons = append(reasons, darkReasonLowAwardRate)
+		}
+		if b.Awards >= 3 && b.UniqueWinners == 1 {
+			reasons = append(reasons, darkReasonSingleWinner)
+		}
+		if len(reasons) == 0 {
+			continue
+		}
+		d := darkBuyer{BuyerName: b.BuyerName, BuyerCountry: b.BuyerCountry, Calls: b.Calls, Awards: b.Awards,
+			AwardRate: b.AwardRate, UniqueWinners: b.UniqueWinners, Reasons: reasons, Note: darkBuyerNote}
+		if len(b.winners) > 0 {
+			d.TopWinner = b.winners[0].Name
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+func newNovelDarkBuyersCmd(flags *rootFlags) *cobra.Command {
+	var country, cpv, since, dbPath string
+	var minCalls int
+	var maxAwardRate float64
 
 	cmd := &cobra.Command{
 		Use:   "dark-buyers",
-		Short: "Surface buyers with low award rates or single-winner patterns",
-		Long: `Find contracting authorities whose calls-for-tender rarely produce
-public awards or whose awards go to a suspiciously small number of winners.
+		Short: "Flag contracting authorities whose tenders rarely produce public awards or keep going to one company.",
+		Long: `Use this command to flag buyers with suspicious award patterns (low award rate, single repeat winner). Do NOT use it for the full per-buyer award-rate table; use 'win-rate' instead.
 
-Low award rates can indicate cancelled procedures, framework agreements not yet
-followed by award notices, or procurement data quality issues.
-
-A single-winner pattern (all awards to one company) may warrant further review.
-
-Examples:
-  eu-tenders-pp-cli dark-buyers --country DEU --cpv 72
-  eu-tenders-pp-cli dark-buyers --country FRA --min-calls 5 --since 2023-01-01`,
+Results are heuristic signals that need a manual check: a low award rate can also mean
+awards are published late, below the EU threshold, or outside the synced
+window. A buyer is flagged with reason low_award_rate when awards / calls is
+at or below --max-award-rate, and with single_winner when it has 3 or more
+awards that all went to one company (grouped by name and country). Only
+buyers with at least --min-calls calls for tender are considered.`,
+		Example: strings.Trim(`
+  eu-tenders-pp-cli dark-buyers --country POL --cpv 45
+  eu-tenders-pp-cli dark-buyers --country DEU --cpv 4523 --min-calls 5 --json
+  eu-tenders-pp-cli dark-buyers --country FRA --max-award-rate 0.1 --since 365d --agent`, "\n"),
 		Annotations: map[string]string{
-			"mcp:read-only": "true",
+			"mcp:read-only":  "true",
+			"pp:data-source": "local",
+			"pp:happy-args":  "--country=DEU",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if dryRunOK(flags) {
-				return nil
+			if len(args) == 0 && cmd.Flags().NFlag() == 0 {
+				return cmd.Help()
 			}
-
-			st, err := store.Open(dbPath)
+			if dryRunOK(flags) {
+				return writeDryRun(cmd.OutOrStdout(), flags, "flag buyers with unusual award patterns")
+			}
+			if err := requireLocalSource(flags); err != nil {
+				return err
+			}
+			if err := validateTEDFilters(country, cpv); err != nil {
+				return err
+			}
+			if minCalls < 0 {
+				return usageErr(fmt.Errorf("--min-calls must not be negative"))
+			}
+			if maxAwardRate < 0 {
+				return usageErr(fmt.Errorf("--max-award-rate must not be negative"))
+			}
+			sinceDate, err := resolveSinceDate(since, time.Now())
 			if err != nil {
-				return fmt.Errorf("open store: %w", err)
+				return usageErr(err)
+			}
+			dbPath = resolveTendersDB(dbPath)
+			st, stop, err := openLocalMirror(cmd, flags, dbPath, make([]darkBuyer, 0))
+			if stop {
+				return err
 			}
 			defer st.Close()
+			hintIfNoNotices(cmd, st, "")
 
-			count, _ := st.Count()
-			if count == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No notices synced yet. Run: eu-tenders-pp-cli sync --country %s --cpv %s --since %s\n",
-					orDefault(country, "DEU"), orDefault(cpv, "72000000"), time.Now().AddDate(-1, 0, 0).Format("2006-01-02"))
-				return nil
-			}
-
-			cpvPat := normalizeCPVLike(orDefault(cpv, ""))
-			countryUpper := strings.ToUpper(country)
-
-			q := `WITH buyer_calls AS (
-				SELECT buyer_name, buyer_country, COUNT(*) as call_count
-				FROM notices WHERE notice_type='cn-standard'`
-			var params []interface{}
-
-			if countryUpper != "" {
-				q += " AND buyer_country=?"
-				params = append(params, countryUpper)
-			}
-			if cpvPat != "%" && cpvPat != "" {
-				q += " AND cpv_code LIKE ?"
-				params = append(params, cpvPat)
-			}
-			if since != "" {
-				q += " AND publication_date >= ?"
-				params = append(params, since)
-			}
-
-			q += fmt.Sprintf(" GROUP BY buyer_name, buyer_country HAVING COUNT(*) >= %d\n), buyer_awards AS (\n", minCalls)
-			q += `SELECT buyer_name, buyer_country, COUNT(*) as award_count,
-				COUNT(DISTINCT winner_name) as unique_winners
-				FROM notices WHERE notice_type='can-standard' AND winner_name != ''`
-
-			if countryUpper != "" {
-				q += " AND buyer_country=?"
-				params = append(params, countryUpper)
-			}
-			if cpvPat != "%" && cpvPat != "" {
-				q += " AND cpv_code LIKE ?"
-				params = append(params, cpvPat)
-			}
-			if since != "" {
-				q += " AND publication_date >= ?"
-				params = append(params, since)
-			}
-
-			q += `
-				GROUP BY buyer_name, buyer_country
-			)
-			SELECT c.buyer_name, c.call_count,
-				COALESCE(a.award_count, 0) as awards,
-				COALESCE(a.unique_winners, 0) as unique_winners,
-				ROUND(COALESCE(a.award_count,0)*100.0/c.call_count, 1) as award_rate
-			FROM buyer_calls c LEFT JOIN buyer_awards a ON c.buyer_name=a.buyer_name AND c.buyer_country=a.buyer_country
-			WHERE COALESCE(a.award_count,0)*100.0/c.call_count < 50
-			   OR COALESCE(a.unique_winners, 0) <= 1
-			ORDER BY award_rate ASC
-			LIMIT 100`
-
-			rows, err := st.DB().Query(q, params...)
+			stats, err := buyerAwardStats(cmd.Context(), st, buyerSlice{Country: country, CPV: cpv, Since: sinceDate, MinCalls: minCalls})
 			if err != nil {
-				return fmt.Errorf("query: %w", err)
+				return err
 			}
-			defer rows.Close()
-
-			type darkRow struct {
-				BuyerName     string  `json:"buyer_name"`
-				CallCount     int     `json:"call_count"`
-				Awards        int     `json:"awards"`
-				UniqueWinners int     `json:"unique_winners"`
-				AwardRate     float64 `json:"award_rate"`
+			out := flagDarkBuyers(stats, maxAwardRate)
+			if !wantsHumanTable(cmd.OutOrStdout(), flags) {
+				return printJSONFiltered(cmd.OutOrStdout(), out, flags)
 			}
-
-			var results []darkRow
-			for rows.Next() {
-				var r darkRow
-				if err := rows.Scan(&r.BuyerName, &r.CallCount, &r.Awards, &r.UniqueWinners, &r.AwardRate); err != nil {
-					continue
-				}
-				results = append(results, r)
-			}
-
-			if flags.asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(results)
-			}
-
-			if len(results) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "No dark buyers found (all buyers have award rate ≥ 50%% and multiple winners)\n")
+			if len(out) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No buyers flagged in this slice.")
 				return nil
 			}
-
+			fmt.Fprintln(cmd.OutOrStdout(), "Heuristic signals; check each buyer before acting.")
 			tw := newTabWriter(cmd.OutOrStdout())
-			fmt.Fprintln(tw, "BUYER\tCALLS\tAWARDS\tUNIQUE WINNERS\tAWARD RATE%")
-			for _, r := range results {
-				fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%.1f%%\n",
-					truncate(r.BuyerName, 40),
-					r.CallCount,
-					r.Awards,
-					r.UniqueWinners,
-					r.AwardRate,
-				)
+			fmt.Fprintln(tw, "BUYER\tCOUNTRY\tCALLS\tAWARDS\tRATE\tWINNERS\tTOP WINNER\tREASONS")
+			for _, d := range out {
+				fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%.2f\t%d\t%s\t%s\n", truncate(d.BuyerName, 40), d.BuyerCountry, d.Calls, d.Awards, d.AwardRate, d.UniqueWinners, truncate(d.TopWinner, 30), strings.Join(d.Reasons, ","))
 			}
 			return tw.Flush()
 		},
 	}
-
-	cmd.Flags().StringVar(&cpv, "cpv", "", "CPV code prefix filter")
-	cmd.Flags().StringVar(&country, "country", "", "Buyer country 3-letter ISO code")
-	cmd.Flags().IntVar(&minCalls, "min-calls", 3, "Minimum number of calls to include a buyer")
-	cmd.Flags().StringVar(&since, "since", "", "Only include notices published on or after (YYYY-MM-DD)")
-	cmd.Flags().StringVar(&dbPath, "db", defaultDBPath(), "SQLite database path")
-
+	cmd.Flags().StringVar(&country, "country", "", "Buyer country, 3-letter ISO code (e.g. POL)")
+	cmd.Flags().StringVar(&cpv, "cpv", "", "CPV code or prefix of the market (e.g. 45 construction)")
+	cmd.Flags().IntVar(&minCalls, "min-calls", 3, "Only buyers with at least this many calls for tender in the slice")
+	cmd.Flags().StringVar(&since, "since", "", "Only notices published on or after this date (YYYY-MM-DD) or within a duration (e.g. 365d)")
+	cmd.Flags().Float64Var(&maxAwardRate, "max-award-rate", 0.25, "Flag buyers whose awards / calls is at or below this rate")
+	cmd.Flags().StringVar(&dbPath, "db", "", "SQLite database path (default: the CLI data directory)")
 	return cmd
 }

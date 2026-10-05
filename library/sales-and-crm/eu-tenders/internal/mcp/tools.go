@@ -5,10 +5,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
+	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,29 +18,44 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/cli"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/client"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/cliutil"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/config"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/learn"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/mcp/bound"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/mcp/cobratree"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/platform"
+)
+
+const (
+	// MCP hosts can fan out tool calls faster than a human CLI session.
+	// Keep them on the same polite-client limiter path instead of disabling
+	// pacing with rate=0; users can still tune human CLI calls with --rate-limit.
+	defaultMCPRateLimit = 2
 )
 
 // RegisterTools registers all API operations as MCP tools.
 func RegisterTools(s *server.MCPServer) {
+	installFreshTenantGate(s)
 	s.AddTool(
 		mcplib.NewTool("notices_search",
-			mcplib.WithDescription("Search for notices using expert search query. More information about the query format and field names can be found on [this page](https://ted.europa.eu/en/search/expert-search)). Optional: checkQuerySyntax (default: false), fields, iterationNextToken (plus 6 more)."),
-			mcplib.WithString("checkQuerySyntax", mcplib.Description("To check the syntax of the query. When the parameter is set to 'true', the syntax of the query is checked, but the...")),
-			mcplib.WithString("fields", mcplib.Description("Fields to return for each notice")),
-			mcplib.WithString("iterationNextToken", mcplib.Description("Opaque token returned by the previous call to the search endpoint to retrieve the next result page. It shouldn't be...")),
-			mcplib.WithString("limit", mcplib.Description("Maximum number of returned notices, used to paginate results. You can retrieve up to 250 notices per page, and 10000...")),
-			mcplib.WithString("onlyLatestVersions", mcplib.Description("Include only the latest versions")),
-			mcplib.WithString("page", mcplib.Description("Result page number, used to paginate results")),
-			mcplib.WithString("paginationMode", mcplib.Description("The PAGE_NUMBER mode allows you to retrieve up to 15000 notices for a given query, using pagination. To retrieve...")),
-			mcplib.WithString("query", mcplib.Description("Expert search query to filter and sort notices")),
+			mcplib.WithDescription("Search TED notices with an expert query (for example buyer-country=DEU AND classification-cpv=45000000 SORT BY publication-date DESC) and choose the returned fields. Query syntax and field names: https://ted.europa.eu/en/search/expert-search. Required: fields, query. Optional: checkQuerySyntax (default: false), iterationNextToken, limit (default: 10) (plus 4 more)."),
+			mcplib.WithBoolean("checkQuerySyntax", mcplib.Description("To check the syntax of the query.")),
+			mcplib.WithString("fields", mcplib.Required(), mcplib.Description("Fields to return for each notice")),
+			mcplib.WithString("iterationNextToken", mcplib.Description("Opaque token returned by the previous call to the search endpoint to retrieve the next result page.")),
+			mcplib.WithNumber("limit", mcplib.Description("Maximum number of returned notices, used to paginate results.")),
+			mcplib.WithBoolean("onlyLatestVersions", mcplib.Description("Include only the latest versions")),
+			mcplib.WithNumber("page", mcplib.Description("Result page number, used to paginate results")),
+			mcplib.WithString("paginationMode", mcplib.Description("The PAGE_NUMBER mode allows you to retrieve up to 15000 notices for a given query, using pagination.")),
+			mcplib.WithString("query", mcplib.Required(), mcplib.Description("Expert search query to filter and sort notices")),
 			mcplib.WithString("scope", mcplib.Description("Search scope (LATEST: only notices of the current OJ S release, ACTIVE: only active notices, ALL: all notices)")),
+			mcplib.WithReadOnlyHintAnnotation(true),
 			mcplib.WithDestructiveHintAnnotation(false),
 			mcplib.WithOpenWorldHintAnnotation(true),
 		),
-		makeAPIHandler("POST", "/v3/notices/search", []mcpParamBinding{{PublicName: "checkQuerySyntax", WireName: "checkQuerySyntax", Location: "body"}, {PublicName: "fields", WireName: "fields", Location: "body"}, {PublicName: "iterationNextToken", WireName: "iterationNextToken", Location: "body"}, {PublicName: "limit", WireName: "limit", Location: "body"}, {PublicName: "onlyLatestVersions", WireName: "onlyLatestVersions", Location: "body"}, {PublicName: "page", WireName: "page", Location: "body"}, {PublicName: "paginationMode", WireName: "paginationMode", Location: "body"}, {PublicName: "query", WireName: "query", Location: "body"}, {PublicName: "scope", WireName: "scope", Location: "body"}}, []string{}),
+		makeAPIHandler("POST", "/v3/notices/search", true, false, nil, mcpPageConfig{}, []mcpParamBinding{{PublicName: "checkQuerySyntax", WireName: "checkQuerySyntax", Location: "body"}, {PublicName: "fields", WireName: "fields", Location: "body"}, {PublicName: "iterationNextToken", WireName: "iterationNextToken", Location: "body"}, {PublicName: "limit", WireName: "limit", Location: "body"}, {PublicName: "onlyLatestVersions", WireName: "onlyLatestVersions", Location: "body"}, {PublicName: "page", WireName: "page", Location: "body"}, {PublicName: "paginationMode", WireName: "paginationMode", Location: "body"}, {PublicName: "query", WireName: "query", Location: "body"}, {PublicName: "scope", WireName: "scope", Location: "body"}}, []string{}),
 	)
+	// Intent tools — higher-level compositions declared in the spec or lifted from recipes.
+	RegisterIntents(s)
 
 	// Context tool — front-loaded domain knowledge for agents.
 	// Call this first to understand the API taxonomy, query patterns, and capabilities.
@@ -48,7 +65,7 @@ func RegisterTools(s *server.MCPServer) {
 			mcplib.WithReadOnlyHintAnnotation(true),
 			mcplib.WithDestructiveHintAnnotation(false),
 		),
-		handleContext,
+		handleContext(s),
 	)
 
 	// Runtime Cobra-tree mirror — exposes every user-facing command that is
@@ -62,18 +79,69 @@ type mcpParamBinding struct {
 	Location   string
 }
 
+type mcpPageConfig struct {
+	CursorParam    string
+	NextCursorPath string
+}
+
+func formatMCPParamValue(v any) string {
+	switch tv := v.(type) {
+	case string:
+		return tv
+	case bool:
+		return strconv.FormatBool(tv)
+	case float64:
+		if math.IsNaN(tv) || math.IsInf(tv, 0) {
+			return strconv.FormatFloat(tv, 'f', -1, 64)
+		}
+		if math.Trunc(tv) == tv && math.Abs(tv) < 1e15 {
+			return strconv.FormatInt(int64(tv), 10)
+		}
+		return strconv.FormatFloat(tv, 'f', -1, 64)
+	case float32:
+		f := float64(tv)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return strconv.FormatFloat(f, 'f', -1, 32)
+		}
+		if math.Trunc(f) == f && math.Abs(f) < 1e15 {
+			return strconv.FormatInt(int64(f), 10)
+		}
+		return strconv.FormatFloat(f, 'f', -1, 32)
+	default:
+		// Composite values (a native []any / map[string]any from an array or
+		// object param) reach this path when bound to a query or path slot;
+		// JSON-encode them so the wire value is valid JSON rather than Go's
+		// "[a b c]" / "map[...]" rendering. Body params never come through
+		// here — they are stored natively in bodyArgs and marshalled there.
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func mcpPathValue(v any) string {
+	return cliutil.EscapePathParam(formatMCPParamValue(v))
+}
+
 // makeAPIHandler creates a generic MCP tool handler for an API endpoint.
-func makeAPIHandler(method, pathTemplate string, bindings []mcpParamBinding, positionalParams []string) server.ToolHandlerFunc {
+func makeAPIHandler(method, pathTemplate string, readOnly bool, binaryResponse bool, headerOverrides map[string]string, pageConfig mcpPageConfig, bindings []mcpParamBinding, positionalParams []string) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		c, err := newMCPClient()
+		c, platformSession, err := newMCPClient(ctx)
 		if err != nil {
-			return mcplib.NewToolResultError(err.Error()), nil
+			return mcpToolError(err.Error()), nil
+		}
+		if platformSession != nil {
+			defer platformSession.ZeroCredentials()
 		}
 
 		// mcp-go v0.47+ made CallToolParams.Arguments an `any` to support
 		// non-map payloads; GetArguments() returns the map[string]any shape
 		// we rely on here (or an empty map when the payload is something else).
 		args := req.GetArguments()
+		if err := cli.AdoptMCPOutputSemantics(platformSession, args); err != nil {
+			return mcpToolError(err.Error()), nil
+		}
 
 		// positionalParams mixes real URL path params with CLI positional
 		// args that map to query params (e.g. `search <query>` -> ?query=);
@@ -83,6 +151,37 @@ func makeAPIHandler(method, pathTemplate string, bindings []mcpParamBinding, pos
 		pathParams := make(map[string]bool, len(positionalParams))
 		params := make(map[string]string)
 		bodyArgs := make(map[string]any)
+		mcpCursor := ""
+		if pageConfig.CursorParam != "" {
+			knownArgs["cursor"] = true
+			if v, ok := args["cursor"]; ok {
+				s, ok := v.(string)
+				if !ok {
+					return mcpToolError("cursor must be an opaque string returned by a previous MCP response"), nil
+				}
+				mcpCursor = s
+				upstreamCursor, err := bound.UpstreamCursor(s)
+				if err != nil {
+					return mcpToolError(err.Error()), nil
+				}
+				if upstreamCursor != "" {
+					params[pageConfig.CursorParam] = upstreamCursor
+				}
+			}
+		}
+		var headers map[string]string
+		if len(headerOverrides) > 0 {
+			headers = make(map[string]string, len(headerOverrides)+1)
+			for k, v := range headerOverrides {
+				headers[k] = v
+			}
+		}
+		if binaryResponse {
+			if headers == nil {
+				headers = map[string]string{}
+			}
+			headers[client.BinaryResponseHeader] = "true"
+		}
 		for _, binding := range bindings {
 			knownArgs[binding.PublicName] = true
 			v, ok := args[binding.PublicName]
@@ -93,11 +192,16 @@ func makeAPIHandler(method, pathTemplate string, bindings []mcpParamBinding, pos
 			case "path":
 				placeholder := "{" + binding.WireName + "}"
 				pathParams[binding.PublicName] = true
-				path = strings.Replace(path, placeholder, fmt.Sprintf("%v", v), 1)
+				path = strings.Replace(path, placeholder, mcpPathValue(v), 1)
+			case "header":
+				if headers == nil {
+					headers = map[string]string{}
+				}
+				headers[binding.WireName] = formatMCPParamValue(v)
 			case "body":
 				bodyArgs[binding.WireName] = v
 			default:
-				params[binding.WireName] = fmt.Sprintf("%v", v)
+				params[binding.WireName] = formatMCPParamValue(v)
 			}
 		}
 		for _, p := range positionalParams {
@@ -107,7 +211,7 @@ func makeAPIHandler(method, pathTemplate string, bindings []mcpParamBinding, pos
 			}
 			pathParams[p] = true
 			if v, ok := args[p]; ok {
-				path = strings.Replace(path, placeholder, fmt.Sprintf("%v", v), 1)
+				path = strings.Replace(path, placeholder, mcpPathValue(v), 1)
 			}
 		}
 
@@ -119,106 +223,272 @@ func makeAPIHandler(method, pathTemplate string, bindings []mcpParamBinding, pos
 			case "POST", "PUT", "PATCH":
 				bodyArgs[k] = v
 			default:
-				params[k] = fmt.Sprintf("%v", v)
+				params[k] = formatMCPParamValue(v)
 			}
 		}
 
 		var data json.RawMessage
 		switch method {
 		case "GET":
-			data, err = c.Get(path, params)
+			if len(headers) > 0 {
+				if readOnly {
+					data, err = c.GetWithHeaders(ctx, path, params, headers)
+				} else {
+					data, err = c.GetMutatingWithHeaders(ctx, path, params, headers)
+				}
+				break
+			}
+			if readOnly {
+				data, err = c.Get(ctx, path, params)
+			} else {
+				data, err = c.GetMutating(ctx, path, params)
+			}
 		case "POST":
-			body, _ := json.Marshal(bodyArgs)
-			data, _, err = c.Post(path, body)
+			if len(headers) > 0 {
+				if readOnly {
+					data, _, err = c.PostQueryWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				} else {
+					data, _, err = c.PostWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				}
+				break
+			}
+			if readOnly {
+				data, _, err = c.PostQueryWithParams(ctx, path, params, bodyArgs)
+			} else {
+				data, _, err = c.PostWithParams(ctx, path, params, bodyArgs)
+			}
 		case "PUT":
-			body, _ := json.Marshal(bodyArgs)
-			data, _, err = c.Put(path, body)
+			if len(headers) > 0 {
+				if readOnly {
+					data, _, err = c.PutQueryWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				} else {
+					data, _, err = c.PutWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				}
+				break
+			}
+			if readOnly {
+				data, _, err = c.PutQueryWithParams(ctx, path, params, bodyArgs)
+			} else {
+				data, _, err = c.PutWithParams(ctx, path, params, bodyArgs)
+			}
 		case "PATCH":
-			body, _ := json.Marshal(bodyArgs)
-			data, _, err = c.Patch(path, body)
+			if len(headers) > 0 {
+				if readOnly {
+					data, _, err = c.PatchQueryWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				} else {
+					data, _, err = c.PatchWithParamsAndHeaders(ctx, path, params, bodyArgs, headers)
+				}
+				break
+			}
+			if readOnly {
+				data, _, err = c.PatchQueryWithParams(ctx, path, params, bodyArgs)
+			} else {
+				data, _, err = c.PatchWithParams(ctx, path, params, bodyArgs)
+			}
 		case "DELETE":
-			data, _, err = c.Delete(path)
+			if len(headers) > 0 {
+				data, _, err = c.DeleteWithParamsAndHeaders(ctx, path, params, headers)
+				break
+			}
+			data, _, err = c.DeleteWithParams(ctx, path, params)
 		default:
-			return mcplib.NewToolResultError("unsupported method: " + method), nil
+			return mcpToolError("unsupported method: " + method), nil
 		}
 
 		if err != nil {
 			msg := err.Error()
 			switch {
 			case strings.Contains(msg, "HTTP 409"):
-				return mcplib.NewToolResultText("already exists (no-op)"), nil
+				return mcpToolTextWithPlatform("already exists (no-op)", platformSession), nil
 			case strings.Contains(msg, "HTTP 401"):
-				return mcplib.NewToolResultError("authentication failed: " + msg +
+				return mcpToolError("authentication failed: " + msg +
 					"\nhint: check your API credentials." +
 					"\n      Run 'eu-tenders-pp-cli doctor' to check auth status."), nil
 			case strings.Contains(msg, "HTTP 403"):
-				return mcplib.NewToolResultError("permission denied: " + msg +
+				return mcpToolError("permission denied: " + msg +
 					"\nhint: this API is configured without credentials; the service may be blocking the request by rate limit, geography, bot protection, or endpoint policy." +
 					"\n      Run 'eu-tenders-pp-cli doctor' to check auth status."), nil
 			case strings.Contains(msg, "HTTP 404"):
 				if method == "DELETE" {
-					return mcplib.NewToolResultText("already deleted (no-op)"), nil
+					return mcpToolTextWithPlatform("already deleted (no-op)", platformSession), nil
 				}
-				return mcplib.NewToolResultError("not found: " + msg), nil
+				return mcpToolError("not found: " + msg), nil
 			case strings.Contains(msg, "HTTP 429"):
-				return mcplib.NewToolResultError("rate limited: " + msg), nil
+				return mcpToolError("rate limited: " + msg), nil
 			default:
-				return mcplib.NewToolResultError(msg), nil
+				return mcpToolError(msg), nil
 			}
 		}
 
-		// For GET responses, wrap bare arrays with count metadata
-		if method == "GET" {
-			trimmed := strings.TrimSpace(string(data))
-			if len(trimmed) > 0 && trimmed[0] == '[' {
-				var items []json.RawMessage
-				if json.Unmarshal(data, &items) == nil {
-					wrapped := map[string]any{
-						"count": len(items),
-						"items": items,
-					}
-					out, _ := json.Marshal(wrapped)
-					return mcplib.NewToolResultText(string(out)), nil
-				}
+		if binaryResponse {
+			encoded := base64.StdEncoding.EncodeToString(data)
+			out, err := json.Marshal(map[string]any{
+				"content_encoding": "base64",
+				"data_base64":      encoded,
+				"byte_count":       len(data),
+			})
+			if err != nil {
+				return mcpToolError(fmt.Sprintf("encoding binary result: %v", err)), nil
 			}
+			if len(out) > bound.MaxBytes {
+				return mcpToolError(fmt.Sprintf("binary response is too large for MCP text output: %d response bytes encode to %d base64 bytes and %d MCP result bytes, exceeding the %d byte budget. Use the companion CLI command with --output <file> to save the payload locally.", len(data), len(encoded), len(out), bound.MaxBytes)), nil
+			}
+			result := string(out)
+			if platformSession != nil {
+				result = bound.WithMetadata(result, platformSession.OutputMetadata())
+			}
+			return mcplib.NewToolResultText(result), nil
 		}
-		return mcplib.NewToolResultText(string(data)), nil
+		if pageConfig.CursorParam != "" {
+			return mcpToolPageResultTextWithPlatform(method, data, pageConfig, mcpCursor, platformSession), nil
+		}
+		return mcpToolResultTextWithPlatform(method, data, platformSession), nil
 	}
 }
 
-func newMCPClient() (*client.Client, error) {
-	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".config", "eu-tenders-pp-cli", "config.toml")
-	cfg, err := config.Load(cfgPath)
+func mcpToolResultText(method string, data json.RawMessage) *mcplib.CallToolResult {
+	return mcpToolResultTextWithPlatform(method, data, nil)
+}
+
+func mcpToolTextWithPlatform(result string, platformSession *platform.Session) *mcplib.CallToolResult {
+	if platformSession != nil {
+		result = bound.WithMetadata(result, platformSession.OutputMetadata())
+	}
+	return mcplib.NewToolResultText(result)
+}
+
+func mcpToolResultTextWithPlatform(method string, data json.RawMessage, platformSession *platform.Session) *mcplib.CallToolResult {
+	result := bound.EndpointResponse(method, data)
+	return mcpToolTextWithPlatform(result, platformSession)
+}
+
+// mcpToolError keeps provider-controlled typed endpoint errors within the MCP
+// text-result budget just like successful endpoint results.
+func mcpToolError(message string) *mcplib.CallToolResult {
+	return mcplib.NewToolResultError(bound.Text(message))
+}
+
+func mcpToolPageResultText(method string, data json.RawMessage, pageConfig mcpPageConfig, cursor string) *mcplib.CallToolResult {
+	return mcpToolPageResultTextWithPlatform(method, data, pageConfig, cursor, nil)
+}
+
+func mcpToolPageResultTextWithPlatform(method string, data json.RawMessage, pageConfig mcpPageConfig, cursor string, platformSession *platform.Session) *mcplib.CallToolResult {
+	result := bound.EndpointPageResponse(method, data, bound.PageOptions{
+		Cursor:         cursor,
+		CursorParam:    pageConfig.CursorParam,
+		NextCursorPath: pageConfig.NextCursorPath,
+	})
+	if platformSession != nil {
+		result = bound.WithMetadata(result, platformSession.OutputMetadata())
+	}
+	return mcplib.NewToolResultText(result)
+}
+
+func newMCPClient(ctx context.Context) (*client.Client, *platform.Session, error) {
+	cfg, err := newMCPConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	return newMCPClientFromConfig(ctx, cfg)
+}
+
+func newMCPConfig() (*config.Config, error) {
+	cfg, err := config.Load("")
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
-	c := client.New(cfg, 30*time.Second, 0)
+	return cfg, nil
+}
+
+func newMCPClientFromConfig(ctx context.Context, cfg *config.Config) (*client.Client, *platform.Session, error) {
+	c := client.New(cfg, 60*time.Second, defaultMCPRateLimit)
 	// Agents calling through MCP need fresh data every call. The on-disk
 	// response cache survives across MCP server invocations, so a
 	// DELETE/PATCH followed by a GET would otherwise return the
 	// pre-mutation snapshot for up to the cache TTL. The interactive CLI
 	// constructs its own client and is unaffected.
 	c.NoCache = true
-	return c, nil
+	session, err := cli.BindMCPClient(ctx, c)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cli.ApplyClientHooks(c); err != nil {
+		if session != nil {
+			session.ZeroCredentials()
+		}
+		return nil, nil, fmt.Errorf("initializing MCP client: %w", err)
+	}
+	return c, session, nil
 }
 
-func dbPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "eu-tenders-pp-cli", "data.db")
+func mcpDBPath() (string, error) {
+	dir, err := cliutil.DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "data.db"), nil
 }
 
-// Note: MCP tools use their own dbPath() because they are in a separate package (main, not cli).
-// The CLI's defaultDBPath() in the cli package uses the same canonical path.
+// toolResultJSON renders v as the indented JSON body of an MCP text result,
+// surfacing a marshal failure as a tool error instead of empty content.
+func toolResultJSON(v any) (*mcplib.CallToolResult, error) {
+	text, err := bound.JSON(v)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("encoding result: %v", err)), nil
+	}
+	return mcplib.NewToolResultText(text), nil
+}
+func registeredCommandMirrorCapabilities(s *server.MCPServer, capabilities []map[string]string) []map[string]string {
+	registered := make([]map[string]string, 0, len(capabilities))
+	root := cli.RootCmd()
+	for _, capability := range capabilities {
+		toolName := cobratree.ToolNameForCommand(s, root, capability["cli_command"])
+		if toolName == "" {
+			continue
+		}
+		entry := s.GetTool(toolName)
+		if entry == nil || entry.Tool.Meta == nil || entry.Tool.Meta.AdditionalFields["pp:tenant-gate"] != "child-cli" {
+			continue
+		}
+		capability["mcp_tool"] = toolName
+		registered = append(registered, capability)
+	}
+	return registered
+}
 
-func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+func handleContext(s *server.MCPServer) func(context.Context, mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return handleContextResult(s, ctx, req)
+	}
+}
+
+func handleContextResult(s *server.MCPServer, _ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	paths := map[string]string{}
+	if dir, err := cliutil.ConfigDir(); err == nil {
+		paths["config_dir"] = dir
+	}
+	if dir, err := cliutil.DataDir(); err == nil {
+		paths["data_dir"] = dir
+	}
+	if dir, err := cliutil.StateDir(); err == nil {
+		paths["state_dir"] = dir
+	}
+	if dir, err := cliutil.CacheDir(); err == nil {
+		paths["cache_dir"] = dir
+	}
 	ctx := map[string]any{
 		"api":         "eu-tenders",
-		"description": "The entire EU public procurement corpus — €815B/year — searchable offline, with B2B lead generation for...",
+		"description": "The EU public procurement corpus searchable offline, with contactable leads from contract award winners.",
 		"archetype":   "generic",
-		"tool_count":  1,
+		"tool_count":  len(s.ListTools()),
+		"paths":       paths,
 		// tool_surface tells agents which surface a capability lives on.
 		"tool_surface": "MCP exposes typed endpoint tools plus a runtime mirror of user-facing CLI commands. Endpoint tools keep typed schemas; command-mirror tools shell out to the companion eu-tenders-pp-cli binary.",
+		// learn_protocol is generated from the single shared source of
+		// truth (the exported constant internal/learn.RecallFirstProtocol)
+		// also consumed by the CLI agent-context command, so the MCP and
+		// CLI agent surfaces cannot drift.
+		"learn_protocol": learn.RecallFirstProtocol,
 		"resources": []map[string]any{
 			{
 				"name":        "notices",
@@ -233,31 +503,34 @@ func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToo
 		},
 		// Command-mirror capabilities are exposed through MCP by shelling out
 		// to the companion CLI binary.
-		"command_mirror_capabilities": []map[string]string{
-			{"name": "Construction Leads", "command": "leads", "description": "Surface recent construction contract award winners as B2B outreach candidates — company name, project location,...", "rationale": "Requires filtering can-standard (award) notices by CPV 45xxxxxx, extracting winner-name + place-of-performance +...", "via": "mcp-command-mirror"},
-			{"name": "Win Rate Analysis", "command": "win-rate", "description": "See what fraction of contract competitions in a market go to new winners vs. incumbents — your real odds before...", "rationale": "Requires local join of call-for-tender and contract-award notices by buyer+CPV — no single API call can provide...", "via": "mcp-command-mirror"},
-			{"name": "Opportunity Scorer", "command": "score", "description": "Get a ranked shortlist of open tenders scored by deadline urgency, contract value, keyword fit, and market openness...", "rationale": "Composite score requires full-text keyword match + deadline math + value lookup + pre-computed win-rate join —...", "via": "mcp-command-mirror"},
-			{"name": "Market Concentration", "command": "concentration", "description": "Compute which companies capture what share of awarded contract value in a sector and country, with HHI score and...", "rationale": "HHI computation across the full award corpus requires aggregating winner_name across tens of thousands of award...", "via": "mcp-command-mirror"},
-			{"name": "Procurement Velocity", "command": "velocity", "description": "See whether a procurement market is heating up, cooling off, or spiking — weekly notice count trends over rolling...", "rationale": "Time-series aggregation across hundreds of synced notices per week — a single API call returns one page, not a trend.", "via": "mcp-command-mirror"},
-			{"name": "Dark Buyers Detector", "command": "dark-buyers", "description": "Surface contracting authorities whose calls-for-tender rarely produce public awards, or whose awards show...", "rationale": "Requires call+award join with award-ratio computation and winner-diversity (Gini) metrics across the full corpus —...", "via": "mcp-command-mirror"},
-			{"name": "CPV Drift", "command": "cpv-drift", "description": "See which procurement categories are growing or shrinking in a country's spending mix year-over-year — essential...", "rationale": "Year-over-year CPV volume and value pivot requires full historical corpus — the API has no aggregation, no CPV...", "via": "mcp-command-mirror"},
-			{"name": "Buyer Profile", "command": "buyer", "description": "Build a full procurement dossier on any contracting authority: their spending cadence, CPV mix, typical contract...", "rationale": "Requires joining all notices where buyer-name matches, computing date differences between paired call+award notices,...", "via": "mcp-command-mirror"},
-			{"name": "Deadline Heat", "command": "deadline-heat", "description": "A ranked calendar of expiring tenders weighted by urgency × value / competition density — your daily prioritized...", "rationale": "Heat score requires filtering by deadline, joining against co-active call count in same CPV bucket, and computing...", "via": "mcp-command-mirror"},
-		},
+		"command_mirror_capabilities": registeredCommandMirrorCapabilities(s, []map[string]string{
+			{"name": "Construction Leads", "command": "leads", "cli_command": "leads", "description": "Get a contactable outreach list of companies that just won construction contracts: one row per winner with email, phone", "rationale": "TED lists contacts in a different order than winner names", "via": "mcp-command-mirror"},
+			{"name": "Open-tender ranker", "command": "score", "cli_command": "score", "description": "Rank open tenders by deadline urgency, contract value and keyword fit into a prioritized bid shortlist.", "rationale": "Combines three signals over every open call in the local corpus; TED and existing tools sort by one column only.", "via": "mcp-command-mirror"},
+			{"name": "Buyer dossier", "command": "buyer", "cli_command": "buyer", "description": "Profile a contracting authority: publishing cadence, CPV mix, typical contract values and repeat winners.", "rationale": "Requires joining years of an authority's calls and awards, which only exists together in the synced store.", "via": "mcp-command-mirror"},
+			{"name": "Market concentration", "command": "concentration", "cli_command": "concentration", "description": "See which companies capture what share of awarded value in a sector and country, with an HHI concentration score.", "rationale": "The API has no aggregation; share and HHI need every award in the slice grouped by winner name and country.", "via": "mcp-command-mirror"},
+			{"name": "Winner dossier", "command": "winner", "cli_command": "winner", "description": "Profile one company that wins public contracts: win timeline, total value, buyers, regions and latest contact data.", "rationale": "Aggregates every award row for a company across years, which no TED view or API call provides.", "via": "mcp-command-mirror"},
+			{"name": "Tender incumbents", "command": "incumbents", "cli_command": "incumbents", "description": "For one open tender, see who previously won contracts from the same buyer in the same category.", "rationale": "Joins the open call's buyer and CPV prefix against historical awards in the local store.", "via": "mcp-command-mirror"},
+			{"name": "Deadline heat", "command": "deadline-heat", "cli_command": "deadline-heat", "description": "A ranked list of tenders closing within days, weighted by urgency", "rationale": "Competition comes from the historical number of distinct winners per award for the same buyer or CPV division in the", "via": "mcp-command-mirror"},
+			{"name": "Buyer award rate", "command": "win-rate", "cli_command": "win-rate", "description": "See per buyer how many calls for tender end in published awards and how many distinct companies win.", "rationale": "Requires joining call notices to award notices per buyer, which the API cannot do.", "via": "mcp-command-mirror"},
+			{"name": "Dark buyers", "command": "dark-buyers", "cli_command": "dark-buyers", "description": "Flag contracting authorities whose tenders rarely produce public awards or keep going to one company.", "rationale": "Applies award-rate and winner-diversity thresholds over the per-buyer call/award join.", "via": "mcp-command-mirror"},
+			{"name": "Procurement velocity", "command": "velocity", "cli_command": "velocity", "description": "See whether a procurement market is heating up or cooling off with weekly notice counts versus the same window last", "rationale": "Time-series bucketing over the synced corpus; no single API call returns trends.", "via": "mcp-command-mirror"},
+			{"name": "CPV drift", "command": "cpv-drift", "cli_command": "cpv-drift", "description": "See which procurement categories grow or shrink year over year in a country's spending mix.", "rationale": "Year-over-year pivot of the full historical corpus held locally.", "via": "mcp-command-mirror"},
+		}),
 		"playbook": []map[string]string{
-			{"topic": "Construction Leads", "insight": "Requires filtering can-standard (award) notices by CPV 45xxxxxx, extracting winner-name + place-of-performance + result-value + touchpoint fields, and ranking by recency + project size — a targeted join across the synced corpus that the API can't do in one call."},
-			{"topic": "Win Rate Analysis", "insight": "Requires local join of call-for-tender and contract-award notices by buyer+CPV — no single API call can provide this cross-notice relationship."},
-			{"topic": "Opportunity Scorer", "insight": "Composite score requires full-text keyword match + deadline math + value lookup + pre-computed win-rate join — four local operations that compose trivially in SQLite."},
-			{"topic": "Market Concentration", "insight": "HHI computation across the full award corpus requires aggregating winner_name across tens of thousands of award notices — the API has no group-by endpoint."},
-			{"topic": "Procurement Velocity", "insight": "Time-series aggregation across hundreds of synced notices per week — a single API call returns one page, not a trend."},
-			{"topic": "Dark Buyers Detector", "insight": "Requires call+award join with award-ratio computation and winner-diversity (Gini) metrics across the full corpus — three metrics, two notice types, one local query."},
-			{"topic": "CPV Drift", "insight": "Year-over-year CPV volume and value pivot requires full historical corpus — the API has no aggregation, no CPV roll-up, no multi-year join."},
-			{"topic": "Buyer Profile", "insight": "Requires joining all notices where buyer-name matches, computing date differences between paired call+award notices, and aggregating across full history."},
-			{"topic": "Deadline Heat", "insight": "Heat score requires filtering by deadline, joining against co-active call count in same CPV bucket, and computing composite — a three-table local query."},
+			{"topic": "Construction Leads", "insight": "TED lists contacts in a different order than winner names; only a local zip against the tenderer list plus seen-state turns award notices into deduplicated, callable leads."},
+			{"topic": "Open-tender ranker", "insight": "Combines three signals over every open call in the local corpus; TED and existing tools sort by one column only."},
+			{"topic": "Buyer dossier", "insight": "Requires joining years of an authority's calls and awards, which only exists together in the synced store."},
+			{"topic": "Market concentration", "insight": "The API has no aggregation; share and HHI need every award in the slice grouped by winner name and country."},
+			{"topic": "Winner dossier", "insight": "Aggregates every award row for a company across years, which no TED view or API call provides."},
+			{"topic": "Tender incumbents", "insight": "Joins the open call's buyer and CPV prefix against historical awards in the local store."},
+			{"topic": "Deadline heat", "insight": "Competition comes from the historical number of distinct winners per award for the same buyer or CPV division in the local store."},
+			{"topic": "Buyer award rate", "insight": "Requires joining call notices to award notices per buyer, which the API cannot do."},
+			{"topic": "Dark buyers", "insight": "Applies award-rate and winner-diversity thresholds over the per-buyer call/award join."},
+			{"topic": "Procurement velocity", "insight": "Time-series bucketing over the synced corpus; no single API call returns trends."},
+			{"topic": "CPV drift", "insight": "Year-over-year pivot of the full historical corpus held locally."},
 		},
 	}
-	data, _ := json.MarshalIndent(ctx, "", "  ")
-	return mcplib.NewToolResultText(string(data)), nil
+	return toolResultJSON(ctx)
 }
 
 // RegisterNovelFeatureTools is kept as a compatibility no-op for older MCP

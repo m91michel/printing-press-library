@@ -1,7 +1,9 @@
 .PHONY: build test lint install clean
 
+BIN_EXT := $(if $(filter windows,$(shell go env GOOS)),.exe,)
+
 build:
-	go build -o bin/eu-tenders-pp-cli ./cmd/eu-tenders-pp-cli
+	go build -trimpath -o bin/eu-tenders-pp-cli$(BIN_EXT) ./cmd/eu-tenders-pp-cli
 
 test:
 	go test ./...
@@ -16,7 +18,7 @@ clean:
 	rm -rf bin/
 
 build-mcp:
-	go build -o bin/eu-tenders-pp-mcp ./cmd/eu-tenders-pp-mcp
+	go build -trimpath -o bin/eu-tenders-pp-mcp$(BIN_EXT) ./cmd/eu-tenders-pp-mcp
 
 install-mcp:
 	go install ./cmd/eu-tenders-pp-mcp

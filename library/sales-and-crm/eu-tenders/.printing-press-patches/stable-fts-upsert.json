@@ -7,7 +7,10 @@
   "summary": "Keep the FTS index accurate when a synced notice is updated.",
   "reason": "External-content FTS5 tables retain old tokens unless the previous indexed row is deleted before reinsert.",
   "files": [
-    "internal/store/store.go"
+    "internal/store/tenders.go"
   ],
-  "validated_outcome": "SQLite reproduction returns oldmatch=0 and newmatch=1 after an updated notice title is reindexed."
+  "validated_outcome": "SQLite reproduction returns oldmatch=0 and newmatch=1 after an updated notice title is reindexed.",
+  "call_sites": [
+    "DELETE FROM notices_fts WHERE notice_id=?"
+  ]
 }

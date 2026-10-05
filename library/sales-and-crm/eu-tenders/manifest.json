@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "eu-tenders-pp-mcp",
   "display_name": "EU Tenders",
-  "version": "4.0.6",
-  "description": "EU public procurement notices as MCP tools.",
+  "version": "3.0.0",
+  "description": "The EU public procurement corpus searchable offline, with contactable leads from contract award winners.",
   "author": {
     "name": "CLI Printing Press"
   },
@@ -23,6 +23,5 @@
       "linux",
       "win32"
     ]
-  },
-  "api_name": "eu-tenders"
+  }
 }

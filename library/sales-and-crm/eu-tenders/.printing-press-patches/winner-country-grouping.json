@@ -10,5 +10,8 @@
     "internal/cli/buyer.go",
     "internal/cli/concentration.go"
   ],
-  "validated_outcome": "go test ./... passes."
+  "validated_outcome": "go test ./... passes.",
+  "call_sites": [
+    "GROUP BY w.name_key, w.country"
+  ]
 }

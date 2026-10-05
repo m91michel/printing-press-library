@@ -1,0 +1,296 @@
+{
+  "api_name": "eu-tenders",
+  "novelty_score": 8,
+  "alternatives": [
+    {
+      "name": "ted-cli",
+      "url": "https://github.com/jgalea/ted-cli",
+      "language": "Python",
+      "install_method": "",
+      "stars": 0,
+      "last_updated": "",
+      "command_count": 5,
+      "has_json_output": false,
+      "has_auth_support": false
+    }
+  ],
+  "gaps": [],
+  "patterns": [],
+  "recommendation": "proceed",
+  "researched_at": "2026-10-02T14:52:37Z",
+  "novel_features": [
+    {
+      "name": "Construction Leads",
+      "command": "leads",
+      "description": "Get a contactable outreach list of companies that just won construction contracts: one row per winner with email, phone, city and VAT/HRB id when TED reports them, plus contract value and what is being built.",
+      "rationale": "TED lists contacts in a different order than winner names; only a local zip against the tenderer list plus seen-state turns award notices into deduplicated, callable leads.",
+      "example": "eu-tenders-pp-cli leads --country DEU --cpv 45 --days 30 --region DE2 --agent",
+      "why_it_matters": "Reach for this when an agent needs sales leads from public contract awards instead of raw notices.",
+      "group": "Lead generation from award winners"
+    },
+    {
+      "name": "Open-tender ranker",
+      "command": "score",
+      "description": "Rank open tenders by deadline urgency, contract value and keyword fit into a prioritized bid shortlist.",
+      "rationale": "Combines three signals over every open call in the local corpus; TED and existing tools sort by one column only.",
+      "example": "eu-tenders-pp-cli score --country DEU --cpv 45 --keywords Hochbau,Neubau --agent",
+      "why_it_matters": "Use it when asked which open tenders are worth bidding on this week.",
+      "group": "Bid prioritization"
+    },
+    {
+      "name": "Buyer dossier",
+      "command": "buyer",
+      "description": "Profile a contracting authority: publishing cadence, CPV mix, typical contract values and repeat winners.",
+      "rationale": "Requires joining years of an authority's calls and awards, which only exists together in the synced store.",
+      "example": "eu-tenders-pp-cli buyer --name \"Stadt München\" --show-winners --agent",
+      "why_it_matters": "Use it before bidding to one authority or when investigating its award history.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Market concentration",
+      "command": "concentration",
+      "description": "See which companies capture what share of awarded value in a sector and country, with an HHI concentration score.",
+      "rationale": "The API has no aggregation; share and HHI need every award in the slice grouped by winner name and country.",
+      "example": "eu-tenders-pp-cli concentration --country POL --cpv 4523 --top 5 --agent",
+      "why_it_matters": "Use it to answer who dominates a procurement market.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Winner dossier",
+      "command": "winner",
+      "description": "Profile one company that wins public contracts: win timeline, total value, buyers, regions and latest contact data.",
+      "rationale": "Aggregates every award row for a company across years, which no TED view or API call provides.",
+      "example": "eu-tenders-pp-cli winner \"Johann Bunte\" --country DEU --agent",
+      "why_it_matters": "Use it before calling a lead or sizing up a competitor.",
+      "group": "Lead generation from award winners"
+    },
+    {
+      "name": "Tender incumbents",
+      "command": "incumbents",
+      "description": "For one open tender, see who previously won contracts from the same buyer in the same category.",
+      "rationale": "Joins the open call's buyer and CPV prefix against historical awards in the local store.",
+      "example": "eu-tenders-pp-cli incumbents 679227-2026 --agent",
+      "why_it_matters": "Use it to judge your odds against the incumbent before writing a proposal.",
+      "group": "Bid prioritization"
+    },
+    {
+      "name": "Deadline heat",
+      "command": "deadline-heat",
+      "description": "A ranked list of tenders closing within days, weighted by urgency, value and how few companies usually win this buyer's awards.",
+      "rationale": "Competition comes from the historical number of distinct winners per award for the same buyer or CPV division in the local store.",
+      "example": "eu-tenders-pp-cli deadline-heat --country DEU --cpv 45 --days 14 --agent",
+      "why_it_matters": "Use it for last-minute bid triage.",
+      "group": "Bid prioritization"
+    },
+    {
+      "name": "Buyer award rate",
+      "command": "win-rate",
+      "description": "See per buyer how many calls for tender end in published awards and how many distinct companies win.",
+      "rationale": "Requires joining call notices to award notices per buyer, which the API cannot do.",
+      "example": "eu-tenders-pp-cli win-rate --country DEU --cpv 45 --min-calls 3 --agent",
+      "why_it_matters": "Use it to compare buyers by openness before targeting them.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Dark buyers",
+      "command": "dark-buyers",
+      "description": "Flag contracting authorities whose tenders rarely produce public awards or keep going to one company.",
+      "rationale": "Applies award-rate and winner-diversity thresholds over the per-buyer call/award join.",
+      "example": "eu-tenders-pp-cli dark-buyers --country POL --cpv 45 --agent",
+      "why_it_matters": "Use it for procurement integrity screening; results are heuristic signals, not findings.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Procurement velocity",
+      "command": "velocity",
+      "description": "See whether a procurement market is heating up or cooling off with weekly notice counts versus the same window last year.",
+      "rationale": "Time-series bucketing over the synced corpus; no single API call returns trends.",
+      "example": "eu-tenders-pp-cli velocity --country DEU --cpv 45 --window 90d --compare 1y --agent",
+      "why_it_matters": "Use it to spot demand shifts in a sector.",
+      "group": "Trends"
+    },
+    {
+      "name": "CPV drift",
+      "command": "cpv-drift",
+      "description": "See which procurement categories grow or shrink year over year in a country's spending mix.",
+      "rationale": "Year-over-year pivot of the full historical corpus held locally.",
+      "example": "eu-tenders-pp-cli cpv-drift --country FRA --metric value --top 20 --agent",
+      "why_it_matters": "Use it for market sizing and policy research.",
+      "group": "Trends"
+    }
+  ],
+  "novel_features_built": [
+    {
+      "name": "Construction Leads",
+      "command": "leads",
+      "description": "Get a contactable outreach list of companies that just won construction contracts: one row per winner with email, phone, city and VAT/HRB id when TED reports them, plus contract value and what is being built.",
+      "rationale": "TED lists contacts in a different order than winner names; only a local zip against the tenderer list plus seen-state turns award notices into deduplicated, callable leads.",
+      "example": "eu-tenders-pp-cli leads --country DEU --cpv 45 --days 30 --region DE2 --agent",
+      "why_it_matters": "Reach for this when an agent needs sales leads from public contract awards instead of raw notices.",
+      "group": "Lead generation from award winners"
+    },
+    {
+      "name": "Open-tender ranker",
+      "command": "score",
+      "description": "Rank open tenders by deadline urgency, contract value and keyword fit into a prioritized bid shortlist.",
+      "rationale": "Combines three signals over every open call in the local corpus; TED and existing tools sort by one column only.",
+      "example": "eu-tenders-pp-cli score --country DEU --cpv 45 --keywords Hochbau,Neubau --agent",
+      "why_it_matters": "Use it when asked which open tenders are worth bidding on this week.",
+      "group": "Bid prioritization"
+    },
+    {
+      "name": "Buyer dossier",
+      "command": "buyer",
+      "description": "Profile a contracting authority: publishing cadence, CPV mix, typical contract values and repeat winners.",
+      "rationale": "Requires joining years of an authority's calls and awards, which only exists together in the synced store.",
+      "example": "eu-tenders-pp-cli buyer --name \"Stadt München\" --show-winners --agent",
+      "why_it_matters": "Use it before bidding to one authority or when investigating its award history.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Market concentration",
+      "command": "concentration",
+      "description": "See which companies capture what share of awarded value in a sector and country, with an HHI concentration score.",
+      "rationale": "The API has no aggregation; share and HHI need every award in the slice grouped by winner name and country.",
+      "example": "eu-tenders-pp-cli concentration --country POL --cpv 4523 --top 5 --agent",
+      "why_it_matters": "Use it to answer who dominates a procurement market.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Winner dossier",
+      "command": "winner",
+      "description": "Profile one company that wins public contracts: win timeline, total value, buyers, regions and latest contact data.",
+      "rationale": "Aggregates every award row for a company across years, which no TED view or API call provides.",
+      "example": "eu-tenders-pp-cli winner \"Johann Bunte\" --country DEU --agent",
+      "why_it_matters": "Use it before calling a lead or sizing up a competitor.",
+      "group": "Lead generation from award winners"
+    },
+    {
+      "name": "Tender incumbents",
+      "command": "incumbents",
+      "description": "For one open tender, see who previously won contracts from the same buyer in the same category.",
+      "rationale": "Joins the open call's buyer and CPV prefix against historical awards in the local store.",
+      "example": "eu-tenders-pp-cli incumbents 679227-2026 --agent",
+      "why_it_matters": "Use it to judge your odds against the incumbent before writing a proposal.",
+      "group": "Bid prioritization"
+    },
+    {
+      "name": "Deadline heat",
+      "command": "deadline-heat",
+      "description": "A ranked list of tenders closing within days, weighted by urgency, value and how few companies usually win this buyer's awards.",
+      "rationale": "Competition comes from the historical number of distinct winners per award for the same buyer or CPV division in the local store.",
+      "example": "eu-tenders-pp-cli deadline-heat --country DEU --cpv 45 --days 14 --agent",
+      "why_it_matters": "Use it for last-minute bid triage.",
+      "group": "Bid prioritization"
+    },
+    {
+      "name": "Buyer award rate",
+      "command": "win-rate",
+      "description": "See per buyer how many calls for tender end in published awards and how many distinct companies win.",
+      "rationale": "Requires joining call notices to award notices per buyer, which the API cannot do.",
+      "example": "eu-tenders-pp-cli win-rate --country DEU --cpv 45 --min-calls 3 --agent",
+      "why_it_matters": "Use it to compare buyers by openness before targeting them.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Dark buyers",
+      "command": "dark-buyers",
+      "description": "Flag contracting authorities whose tenders rarely produce public awards or keep going to one company.",
+      "rationale": "Applies award-rate and winner-diversity thresholds over the per-buyer call/award join.",
+      "example": "eu-tenders-pp-cli dark-buyers --country POL --cpv 45 --agent",
+      "why_it_matters": "Use it for procurement integrity screening; results are heuristic signals, not findings.",
+      "group": "Market and buyer intelligence"
+    },
+    {
+      "name": "Procurement velocity",
+      "command": "velocity",
+      "description": "See whether a procurement market is heating up or cooling off with weekly notice counts versus the same window last year.",
+      "rationale": "Time-series bucketing over the synced corpus; no single API call returns trends.",
+      "example": "eu-tenders-pp-cli velocity --country DEU --cpv 45 --window 90d --compare 1y --agent",
+      "why_it_matters": "Use it to spot demand shifts in a sector.",
+      "group": "Trends"
+    },
+    {
+      "name": "CPV drift",
+      "command": "cpv-drift",
+      "description": "See which procurement categories grow or shrink year over year in a country's spending mix.",
+      "rationale": "Year-over-year pivot of the full historical corpus held locally.",
+      "example": "eu-tenders-pp-cli cpv-drift --country FRA --metric value --top 20 --agent",
+      "why_it_matters": "Use it for market sizing and policy research.",
+      "group": "Trends"
+    }
+  ],
+  "narrative": {
+    "display_name": "EU Tenders",
+    "headline": "The EU public procurement corpus searchable offline, with contactable leads from contract award winners.",
+    "value_prop": "Sync TED notices into a local SQLite store and turn award notices into outreach lists with leads, including email, phone and VAT id per winner when TED reports them. Rank open calls with score and deadline-heat, and analyze markets with concentration, buyer, winner, velocity and cpv-drift. No API key needed.",
+    "quickstart": [
+      {
+        "command": "eu-tenders-pp-cli doctor",
+        "comment": "Check config, paths and TED API reachability"
+      },
+      {
+        "command": "eu-tenders-pp-cli sync --since 30d --param country=DEU --param cpv=45",
+        "comment": "Pull the last 30 days of German construction notices into the local store"
+      },
+      {
+        "command": "eu-tenders-pp-cli leads --country DEU --cpv 45 --days 30",
+        "comment": "List companies that just won construction contracts, with contact data"
+      },
+      {
+        "command": "eu-tenders-pp-cli score --country DEU --cpv 45 --keywords Neubau",
+        "comment": "Rank open tenders worth bidding on"
+      }
+    ],
+    "troubleshoots": [
+      {
+        "symptom": "Analytics commands return no rows",
+        "fix": "Run eu-tenders-pp-cli sync --since 90d --param country=DEU --param cpv=45 first; they read the local store"
+      },
+      {
+        "symptom": "Lead titles look like reference codes",
+        "fix": "Re-run eu-tenders-pp-cli sync for that window; sync stores the procedure title (title-proc) ahead of lot reference titles"
+      },
+      {
+        "symptom": "Query syntax error from TED",
+        "fix": "Run eu-tenders-pp-cli fields to check field names; values with spaces need quotes"
+      }
+    ],
+    "when_to_use": "Use this CLI to find EU public tenders, analyze who wins public contracts, or build B2B lead lists from contract award winners. It suits recurring sales prospecting, bid triage and procurement market research over TED data.",
+    "anti_triggers": [
+      "Submitting or publishing notices to TED as an eSender",
+      "National below-threshold tenders that are not published on TED",
+      "Legal advice on procurement procedures"
+    ],
+    "recipes": [
+      {
+        "title": "Weekly construction-award leads",
+        "command": "eu-tenders-pp-cli leads --country DEU --cpv 45 --days 7 --new-only --agent --select winner_name,winner_email,winner_phone,winner_city,contract_value,title",
+        "explanation": "Only companies not returned by earlier --new-only runs; this run's companies are recorded in the local lead_seen table."
+      },
+      {
+        "title": "Group leads by company",
+        "command": "eu-tenders-pp-cli leads --country DEU --cpv 45 --days 90 --group-by company --agent",
+        "explanation": "One row per company with win count and total value, ordered by biggest winners."
+      },
+      {
+        "title": "Who dominates road construction",
+        "command": "eu-tenders-pp-cli concentration --country POL --cpv 4523 --top 10 --agent",
+        "explanation": "Winner share and HHI for a market slice."
+      },
+      {
+        "title": "Check the incumbent before bidding",
+        "command": "eu-tenders-pp-cli incumbents 679227-2026 --agent",
+        "explanation": "Prior winners from the same buyer and category."
+      }
+    ],
+    "trigger_phrases": [
+      "find EU procurement contracts",
+      "who won construction contracts in Germany",
+      "leads from tender award winners",
+      "open tenders expiring soon",
+      "use eu-tenders",
+      "run eu-tenders-pp-cli"
+    ]
+  }
+}

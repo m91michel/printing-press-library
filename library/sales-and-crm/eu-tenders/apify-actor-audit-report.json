@@ -1,0 +1,9 @@
+{
+  "dir": "\u003ccli-dir\u003e/eu-tenders-pp-cli",
+  "research_dir": "\u003ccli-dir\u003e/20261002-164440-b13c3738",
+  "verdict": "pass",
+  "actors": null,
+  "issues": [
+    "no Apify actor references found, skipping"
+  ]
+}

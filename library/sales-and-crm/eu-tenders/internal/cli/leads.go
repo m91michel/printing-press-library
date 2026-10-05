@@ -1,335 +1,229 @@
 // Copyright 2026 Mathias Michel and contributors. Licensed under Apache-2.0. See LICENSE.
+// pp:data-source auto
 
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/store"
-
 	"github.com/spf13/cobra"
+
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/store"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/ted"
 )
 
-// LeadRow represents a construction contract award winner as a B2B lead.
-type LeadRow struct {
-	WinnerName     string  `json:"winner_name"`
-	WinnerCountry  string  `json:"winner_country"`
-	Title          string  `json:"title"`
-	CPVDescription string  `json:"cpv_description"`
-	ContractValue  float64 `json:"contract_value"`
-	Currency       string  `json:"currency"`
-	Location       string  `json:"location"`
-	PublishedDate  string  `json:"published_date"`
-	CPVCode        string  `json:"cpv_code"`
-	BuyerName      string  `json:"buyer_name"`
-	BuyerCountry   string  `json:"buyer_country"`
-	TEDURL         string  `json:"ted_url"`
-}
-
-func newLeadsCmd(flags *rootFlags) *cobra.Command {
+func newNovelLeadsCmd(flags *rootFlags) *cobra.Command {
 	var (
-		cpv      string
-		country  string
-		region   string
-		keywords string
-		minValue float64
-		days     int
-		dbPath   string
-		limit    int
+		country, cpv, keywords, region, groupBy, dbPath string
+		days, limit, maxScan                            int
+		minValue                                        float64
+		newOnly                                         bool
 	)
-
 	cmd := &cobra.Command{
 		Use:   "leads",
-		Short: "Find recent construction contract award winners for B2B outreach",
-		Long: `Surface companies that recently won construction contracts — ideal for
-outreach from suppliers of construction machinery, materials, or services.
+		Short: "Find companies that recently won construction contracts, with contact data for outreach",
+		Long: `Use this command to get a contactable outreach list of companies that recently won contracts.
+Do NOT use it to profile one known company's history; use 'winner' instead.
+Do NOT use it for a plain award table without contacts; use 'awards' instead.
 
-The JSON output includes cpv_description as a human-readable project type when
-the notice title is missing (the TED API omits titles for ~85% of award notices).
+One row per winning company per award notice: company name, email, phone,
+city, post code, NUTS region, VAT/HRB identifier, company size, the project
+title, project location, contract value and the TED link. TED lists contacts
+in organisation-name-tenderer order, which differs from the per-lot winner
+list; this command matches them by company so each row carries the right
+contact data. Values are the company's own lot values when TED reports them,
+otherwise the notice total.
 
-Use --cpv to filter by construction category. Use --keywords to further narrow
-by project type in the notice title (OR-matched, case-insensitive).
+Reads the local store when it holds award notices (run sync first), otherwise
+queries TED live (--data-source live forces the API).
 
-NOTE: TED award notice titles describe what is built (Neubau, Rohbau, Brücke),
-not what equipment is required. Keywords like "Kran" or "Container" will not
-match. Use project-type keywords instead — they imply heavy machinery needs.
+TED titles describe what is built (Neubau, Rohbau, Brücke), not which
+equipment is needed. Use project-type keywords that imply heavy machinery:
+  Neubau, Rohbau, Hochbau, Stahlbeton, Brücke, Tunnel, Krankenhaus, Schulbau,
+  Industriebau, Generalunternehmer
 
-Keywords that imply crane use: Neubau, Rohbau, Hochbau, Stahlbeton, Brücke,
-  Tunnel, Krankenhaus, Schulbau, Industriebau, Generalunternehmer
-
-CPV codes by project type (useful for ICP targeting):
-  45500000  Machinery hire with operator (direct buyers of construction equipment rental)
-  45000000  All construction work (broadest net)
-  45200000  Civil engineering work (roads, bridges, infrastructure)
-  45310000  Electrical installation (covers PV/solar farm construction)
-  45230000  Pipelines and power line construction (wind farm cables)
+CPV codes by project type:
+  45500000  Hire of construction machinery with operator (direct equipment buyers)
+  45000000  All construction work (broadest net, default --cpv 45)
+  45200000  Civil engineering (roads, bridges, infrastructure)
   45210000  Building construction (Hochbau, hospitals, schools)
+  45230000  Pipelines, power lines, roads (wind/grid cabling)
+  45310000  Electrical installation (covers PV/solar farm construction)
 
-For a weekly Slack digest of new machinery hire leads:
-  eu-tenders-pp-cli leads --cpv 45 --country DEU --days 7 --json
-
-For PV/solar construction company leads (companies that typically rent, not own, heavy machines):
-  eu-tenders-pp-cli leads --cpv 45310000 --country DEU --days 30 --json
-
-Examples:
+--group-by company folds rows into one per company with win count and total
+value. --new-only skips companies returned by earlier --new-only runs and
+records the ones it returns, for a weekly "only new leads" digest.`,
+		Example: strings.Trim(`
   eu-tenders-pp-cli leads --country DEU --days 7 --json
-  eu-tenders-pp-cli leads --cpv 45310000 --country DEU --days 30 --json
+  eu-tenders-pp-cli leads --country DEU --cpv 45310000 --days 30 --json
   eu-tenders-pp-cli leads --country DEU --keywords "Neubau,Rohbau,Hochbau" --days 90
-  eu-tenders-pp-cli leads --country DEU --keywords "Brücke,Tunnel,Krankenhaus" --days 90
-  eu-tenders-pp-cli leads --cpv 45500000 --country DEU --days 365`,
+  eu-tenders-pp-cli leads --country DEU --cpv 45 --days 30 --region DE2 --group-by company
+  eu-tenders-pp-cli leads --country DEU --cpv 45 --days 7 --new-only --agent --select winner_name,winner_email,winner_phone,contract_value,title`, "\n"),
 		Annotations: map[string]string{
-			"mcp:read-only": "true",
+			"pp:data-source": "auto",
+			// The happy path only reads TED and the sandbox store; without
+			// --new-only it writes nothing, so live dogfood may run it for real.
+			"pp:live-happy-path": "true",
+			"pp:happy-args":      "--country=DEU;--days=14;--limit=10",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 && cmd.Flags().NFlag() == 0 {
+				return cmd.Help()
+			}
 			if dryRunOK(flags) {
+				return writeDryRun(cmd.OutOrStdout(), flags, "find award-winner leads")
+			}
+			if days <= 0 {
+				return usageErr(fmt.Errorf("--days must be positive"))
+			}
+			switch groupBy {
+			case "", "none", "company":
+			default:
+				return usageErr(fmt.Errorf("invalid --group-by %q: use company or none", groupBy))
+			}
+			since := daysAgo(days, time.Now())
+			rows, source, scanned, err := loadAwardWinners(cmd, flags, awardQuery{
+				Country: country, CPV: cpv, Since: since, MaxScan: maxScan, DBPath: dbPath,
+			})
+			if err != nil {
+				return err
+			}
+			leads := filterLeads(rows, leadFilter{Keywords: parseCSVList(keywords), MinValue: minValue, Region: region})
+
+			skipped := 0
+			if newOnly {
+				leads, skipped, err = dropSeenLeads(cmd, resolveTendersDB(dbPath), leads)
+				if err != nil {
+					return err
+				}
+			}
+			if source == sourceLive && !flags.quiet {
+				fmt.Fprintf(cmd.ErrOrStderr(), "scanned %d live award notices since %s (raise --max-scan to widen)\n", scanned, since)
+			}
+			if skipped > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %d leads already returned by earlier --new-only runs\n", skipped)
+			}
+
+			if groupBy == "company" {
+				grouped := groupLeadsByCompany(leads)
+				if limit > 0 && len(grouped) > limit {
+					grouped = grouped[:limit]
+				}
+				if newOnly {
+					keys := make([]store.LeadKey, 0, len(grouped))
+					for _, c := range grouped {
+						keys = append(keys, leadStoreKey(c.WinnerName, c.WinnerCountry))
+					}
+					if err := markLeadsSeen(cmd, resolveTendersDB(dbPath), keys); err != nil {
+						return err
+					}
+				}
+				if !wantsHumanTable(cmd.OutOrStdout(), flags) {
+					return printJSONFiltered(cmd.OutOrStdout(), grouped, flags)
+				}
+				if len(grouped) == 0 {
+					fmt.Fprintln(cmd.OutOrStdout(), "No matching award winners.")
+					return nil
+				}
+				tw := newTabWriter(cmd.OutOrStdout())
+				fmt.Fprintln(tw, "COMPANY\tCITY\tWINS\tTOTAL VALUE\tEMAIL\tPHONE\tLATEST")
+				for _, c := range grouped {
+					fmt.Fprintf(tw, "%s\t%s\t%d\t%.0f %s\t%s\t%s\t%s\n", truncate(c.WinnerName, 40), c.WinnerCity, c.Wins, c.TotalValue, c.Currency, c.WinnerEmail, c.WinnerPhone, c.LatestWin)
+				}
+				return tw.Flush()
+			}
+			if limit > 0 && len(leads) > limit {
+				leads = leads[:limit]
+			}
+			if newOnly {
+				keys := make([]store.LeadKey, 0, len(leads))
+				for _, l := range leads {
+					keys = append(keys, leadStoreKey(l.WinnerName, l.WinnerCountry))
+				}
+				if err := markLeadsSeen(cmd, resolveTendersDB(dbPath), keys); err != nil {
+					return err
+				}
+			}
+			if !wantsHumanTable(cmd.OutOrStdout(), flags) {
+				return printJSONFiltered(cmd.OutOrStdout(), leads, flags)
+			}
+			if len(leads) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No matching award winners. Widen --days, drop --keywords, or run sync.")
 				return nil
 			}
-
-			if flags.dataSource == "live" || flags.dataSource == "auto" {
-				return leadsFromLive(cmd, flags, cpv, country, region, keywords, minValue, days, limit)
+			tw := newTabWriter(cmd.OutOrStdout())
+			fmt.Fprintln(tw, "DATE\tCOMPANY\tCITY\tVALUE\tEMAIL\tPHONE\tPROJECT")
+			for _, l := range leads {
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%.0f\t%s\t%s\t%s\n", l.PublishedDate, truncate(l.WinnerName, 36), l.WinnerCity, l.ContractValue, l.WinnerEmail, l.WinnerPhone, truncate(l.Title, 50))
 			}
-			return leadsFromStore(cmd, flags, cpv, country, region, keywords, minValue, days, limit, dbPath)
+			return tw.Flush()
 		},
 	}
-
-	cmd.Flags().StringVar(&cpv, "cpv", "45", "CPV prefix for construction works (default: 45 = all construction)")
-	cmd.Flags().StringVar(&country, "country", "", "Buyer country 3-letter ISO code (e.g. DEU)")
-	cmd.Flags().StringVar(&region, "region", "", "NUTS region code filter (e.g. DE2)")
-	cmd.Flags().StringVar(&keywords, "keywords", "", "Comma-separated keywords to match in notice title (e.g. \"Kran,Container\")")
-	cmd.Flags().Float64Var(&minValue, "min-value", 0, "Minimum contract value in EUR (0 = include notices where value is not reported)")
-	cmd.Flags().IntVar(&days, "days", 90, "Look back N days for recent awards")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum results to return")
-	cmd.Flags().StringVar(&dbPath, "db", defaultDBPath(), "SQLite database path")
-
+	cmd.Flags().StringVar(&country, "country", "", "Buyer country, 3-letter ISO code (e.g. DEU)")
+	cmd.Flags().StringVar(&cpv, "cpv", "45", "CPV code or prefix (default 45 = all construction work)")
+	cmd.Flags().IntVar(&days, "days", 90, "Look back N days for award notices")
+	cmd.Flags().StringVar(&keywords, "keywords", "", "Comma-separated project-type keywords matched in the title, OR-combined (e.g. \"Neubau,Brücke\")")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum rows to return")
+	cmd.Flags().Float64Var(&minValue, "min-value", 0, "Minimum contract value in EUR (0 also keeps notices without a reported value)")
+	cmd.Flags().StringVar(&region, "region", "", "NUTS region prefix of the project location (e.g. DE2 for Bavaria, DE21 for Upper Bavaria)")
+	cmd.Flags().StringVar(&groupBy, "group-by", "", "Set to company for one row per company with win count and total value")
+	cmd.Flags().BoolVar(&newOnly, "new-only", false, "Skip companies returned by earlier --new-only runs and remember the ones returned now")
+	cmd.Flags().IntVar(&maxScan, "max-scan", 500, "Live mode: maximum award notices to read from TED")
+	cmd.Flags().StringVar(&dbPath, "db", "", "SQLite database path (default: the CLI data directory)")
 	return cmd
 }
 
-func leadsFromLive(cmd *cobra.Command, flags *rootFlags, cpv, country, region, keywords string, minValue float64, days, limit int) error {
-	c, err := flags.newClient()
-	if err != nil {
-		return err
-	}
-
-	cpvNorm := normalizeCPV(cpv)
-	since := time.Now().AddDate(0, 0, -days).Format("20060102")
-
-	var queryParts []string
-	queryParts = append(queryParts, "notice-type=can-standard")
-	queryParts = append(queryParts, fmt.Sprintf("classification-cpv IN (%s)", cpvNorm))
-	queryParts = append(queryParts, fmt.Sprintf("PD>=%s", since))
-	if country != "" {
-		queryParts = append(queryParts, fmt.Sprintf("buyer-country=%s", strings.ToUpper(country)))
-	}
-
-	query := strings.Join(queryParts, " AND ")
-	fields := []string{
-		"publication-number", "notice-type", "publication-date",
-		"winner-name", "winner-country", "result-value-notice", "result-value-cur-notice",
-		"classification-cpv", "title-lot", "title-proc", "place-of-performance-post-code-part",
-		"buyer-country", "buyer-name",
-	}
-
-	// When keyword filtering is active, fetch the API maximum (250) so the
-	// post-filter has enough candidates. Without keywords, respect the limit directly.
-	batchLimit := 250
-	if keywords == "" && limit < 250 {
-		batchLimit = limit
-	}
-
-	notices, err := postSearch(c, query, fields, batchLimit)
-	if err != nil {
-		return classifyAPIError(err, flags)
-	}
-
-	kwTerms := parseKeywords(keywords)
-	// Warn when keyword post-filtering may have exhausted the API page before
-	// reaching --limit matches; the user should narrow their date range instead.
-	if len(kwTerms) > 0 && len(notices) == 250 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "note: fetched the API maximum of 250 notices before keyword filtering; results may be incomplete — use a shorter --days window or a more specific --cpv to reduce the candidate set\n")
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	var leads []LeadRow
-	for _, raw := range notices {
-		if limit > 0 && len(leads) >= limit {
-			break
-		}
-		n := extractNotice(raw, now)
-		if region != "" && !strings.HasPrefix(n.PlaceOfPerformance, region) {
-			continue
-		}
-		if !matchesKeywords(n.Title, kwTerms) {
-			continue
-		}
-		val := n.ContractValue
-		if val == 0 {
-			val = n.EstimatedValue
-		}
-		if minValue > 0 && val > 0 && val < minValue {
-			continue
-		}
-		leads = append(leads, LeadRow{
-			WinnerName:     n.WinnerName,
-			WinnerCountry:  n.WinnerCountry,
-			Title:          n.Title,
-			CPVDescription: cpvDescription(n.CPVCode),
-			ContractValue:  val,
-			Currency:       n.Currency,
-			Location:       n.PlaceOfPerformance,
-			PublishedDate:  n.PublicationDate,
-			CPVCode:        n.CPVCode,
-			BuyerName:      n.BuyerName,
-			BuyerCountry:   n.BuyerCountry,
-			TEDURL:         n.NoticeURL,
-		})
-	}
-
-	return printLeads(cmd, flags, leads)
+func leadStoreKey(name, country string) store.LeadKey {
+	return store.LeadKey{NameKey: ted.NormalizeName(name), Country: strings.ToUpper(country)}
 }
 
-func leadsFromStore(cmd *cobra.Command, flags *rootFlags, cpv, country, region, keywords string, minValue float64, days, limit int, dbPath string) error {
-	st, err := store.Open(dbPath)
+// dropSeenLeads removes companies recorded by earlier --new-only runs.
+func dropSeenLeads(cmd *cobra.Command, dbPath string, leads []leadRow) ([]leadRow, int, error) {
+	st, err := store.OpenWithContext(cmd.Context(), dbPath)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		return nil, 0, fmt.Errorf("opening local store for --new-only: %w", err)
 	}
 	defer st.Close()
-
-	count, _ := st.Count()
-	if count == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "No notices synced yet. Run: eu-tenders-pp-cli sync --country %s --cpv %s --since %s\n",
-			orDefault(country, "DEU"), normalizeCPV(cpv), time.Now().AddDate(-1, 0, 0).Format("2006-01-02"))
-		return nil
+	keys := make([]store.LeadKey, 0, len(leads))
+	for _, l := range leads {
+		keys = append(keys, leadStoreKey(l.WinnerName, l.WinnerCountry))
 	}
-
-	since := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
-	q := `SELECT id, publication_date, buyer_name, buyer_country, cpv_code,
-		winner_name, winner_country, contract_value, estimated_value, currency, title,
-		place_of_performance, notice_url
-		FROM notices
-		WHERE notice_type='can-standard'
-		  AND publication_date >= ?
-		  AND cpv_code LIKE ?`
-	params := []interface{}{since, normalizeCPVLike(cpv)}
-
-	if country != "" {
-		q += " AND buyer_country=?"
-		params = append(params, strings.ToUpper(country))
-	}
-	// Region filter in SQL so LIMIT applies after filtering — otherwise
-	// `--limit 50 --region DE2` could return 0–50 rows by silently
-	// dropping the SQL window's non-DE2 results in Go.
-	if region != "" {
-		q += " AND place_of_performance LIKE ?"
-		params = append(params, region+"%")
-	}
-	if minValue > 0 {
-		// Include notices that meet the threshold OR have no reported value (TED often omits contract values).
-		q += " AND (contract_value = 0 AND estimated_value = 0 OR contract_value >= ? OR estimated_value >= ?)"
-		params = append(params, minValue, minValue)
-	}
-	// Keyword filter in SQL so LIMIT applies after filtering, not before.
-	kwTerms := parseKeywords(keywords)
-	if len(kwTerms) > 0 {
-		q += " AND ("
-		for i, t := range kwTerms {
-			if i > 0 {
-				q += " OR "
-			}
-			q += "LOWER(title) LIKE ?"
-			params = append(params, "%"+t+"%")
-		}
-		q += ")"
-	}
-	q += " ORDER BY publication_date DESC LIMIT ?"
-	params = append(params, limit)
-
-	rows, err := st.DB().Query(q, params...)
+	seen, err := st.SeenLeads(cmd.Context(), keys)
 	if err != nil {
-		return fmt.Errorf("query: %w", err)
+		return nil, 0, fmt.Errorf("reading lead seen-state: %w", err)
 	}
-	defer rows.Close()
-	var leads []LeadRow
-	for rows.Next() {
-		var id, pubDate, buyerName, buyerCountry, cpvCode string
-		var winnerName, winnerCountry, currency, title, location, url string
-		var contractValue, estimatedValue float64
-		if err := rows.Scan(&id, &pubDate, &buyerName, &buyerCountry, &cpvCode,
-			&winnerName, &winnerCountry, &contractValue, &estimatedValue, &currency,
-			&title, &location, &url); err != nil {
+	out := make([]leadRow, 0, len(leads))
+	skipped := 0
+	for i, l := range leads {
+		if seen[keys[i]] {
+			skipped++
 			continue
 		}
-		val := contractValue
-		if val == 0 {
-			val = estimatedValue
-		}
-		leads = append(leads, LeadRow{
-			WinnerName:     winnerName,
-			WinnerCountry:  winnerCountry,
-			Title:          title,
-			CPVDescription: cpvDescription(cpvCode),
-			ContractValue:  val,
-			Currency:       currency,
-			Location:       location,
-			PublishedDate:  pubDate,
-			CPVCode:        cpvCode,
-			BuyerName:      buyerName,
-			BuyerCountry:   buyerCountry,
-			TEDURL:         url,
-		})
+		out = append(out, l)
 	}
-
-	return printLeads(cmd, flags, leads)
+	return out, skipped, nil
 }
 
-func printLeads(cmd *cobra.Command, flags *rootFlags, leads []LeadRow) error {
-	if flags.asJSON {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(leads)
-	}
-
-	if len(leads) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "No leads found for the given filters\n")
-		return nil
-	}
-
-	tw := newTabWriter(cmd.OutOrStdout())
-	fmt.Fprintln(tw, "WINNER\tCOUNTRY\tPROJECT\tVALUE\tLOCATION\tPUBLISHED\tTED LINK")
-	for _, l := range leads {
-		val := ""
-		if l.ContractValue > 0 {
-			val = fmt.Sprintf("€%.0f", l.ContractValue)
-		}
-		project := l.Title
-		if project == "" {
-			project = l.CPVDescription
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			truncate(l.WinnerName, 30),
-			l.WinnerCountry,
-			truncate(project, 40),
-			val,
-			l.Location,
-			l.PublishedDate,
-			l.TEDURL,
-		)
-	}
-	return tw.Flush()
-}
-
-// matchesKeywords returns true when text contains at least one of the terms
-// (case-insensitive OR match). Always returns true when terms is nil.
-func matchesKeywords(text string, terms []string) bool {
-	if len(terms) == 0 {
-		return true
-	}
-	lower := strings.ToLower(text)
-	for _, t := range terms {
-		if strings.Contains(lower, t) {
-			return true
+// markLeadsSeen records only the companies this run actually returned, so a
+// --limit cut never hides leads from later --new-only runs.
+func markLeadsSeen(cmd *cobra.Command, dbPath string, keys []store.LeadKey) error {
+	uniq := make([]store.LeadKey, 0, len(keys))
+	dup := map[store.LeadKey]bool{}
+	for _, k := range keys {
+		if !dup[k] {
+			dup[k] = true
+			uniq = append(uniq, k)
 		}
 	}
-	return false
+	st, err := store.OpenWithContext(cmd.Context(), dbPath)
+	if err != nil {
+		return fmt.Errorf("opening local store for --new-only: %w", err)
+	}
+	defer st.Close()
+	if err := st.MarkLeadsSeen(cmd.Context(), uniq); err != nil {
+		return fmt.Errorf("recording lead seen-state: %w", err)
+	}
+	return nil
 }

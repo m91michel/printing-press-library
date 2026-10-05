@@ -5,7 +5,7 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,37 +14,145 @@ import (
 	"time"
 
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/client"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/cliutil"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/config"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/learn"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/platform"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/store"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var version = "2026.9.1"
 
 type rootFlags struct {
-	asJSON        bool
-	compact       bool
-	csv           bool
-	plain         bool
-	quiet         bool
-	dryRun        bool
-	noCache       bool
-	noInput       bool
-	idempotent    bool
-	yes           bool
-	agent         bool
-	selectFields  string
-	configPath    string
-	profileName   string
-	deliverSpec   string
-	timeout       time.Duration
-	rateLimit     float64
-	dataSource    string
-	freshnessMeta any
+	asJSON  bool
+	compact bool
+	csv     bool
+	plain   bool
+	quiet   bool
+	dryRun  bool
+	noCache bool
+	noInput bool
+	yes     bool
+	agent   bool
+	// noLearn disables both teach (write) and recall (read) for this
+	// invocation. Mirrors the EU_TENDERS_NO_LEARN env var.
+	noLearn                 bool
+	selectFields            string
+	configPath              string
+	homePath                string
+	runProfileName          string
+	clientProfileName       string
+	platformSession         *platform.Session
+	platformResolver        platform.CredentialResolver
+	platformResolverReady   bool
+	platformAnalytics       *platform.AnalyticsDeclaration
+	platformGateError       error
+	platformMetadataWriter  io.Writer
+	receiptEnabled          bool
+	receiptFile             string
+	auditDir                string
+	receiptWriter           *platform.ReceiptWriter
+	platformMetadataEmitted bool
+	deliverSpec             string
+	timeout                 time.Duration
+	timeoutExplicit         bool
+	rateLimit               float64
+	dataSource              string
+	agentSource             string
+	freshnessMeta           any
 
 	// deliverBuf captures command output when --deliver is set to a
 	// non-stdout sink. Flushed to the sink after Execute returns.
 	deliverBuf  *bytes.Buffer
 	deliverSink DeliverSink
+}
+
+// novelCommandHooks are optional hooks for hand-authored command extensions.
+// A markerless file in package cli may register one from init without editing
+// this generated root, so force regeneration preserves both the source and
+// wiring. Hooks run after generated novel parent groups are attached so a
+// hook can Find a novel parent and add children. Registration is additive:
+// independent extensions never replace one another, except that a real
+// command replaces a TODO scaffold with the same name.
+var novelCommandHooks []func(root *cobra.Command, flags *rootFlags)
+
+func registerNovelCommand(hook func(root *cobra.Command, flags *rootFlags)) {
+	novelCommandHooks = append(novelCommandHooks, hook)
+}
+
+const novelScaffoldAnnotation = "pp:novel-scaffold"
+
+func isNovelScaffoldCommand(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Annotations[novelScaffoldAnnotation] == "true"
+}
+
+func addNovelCommandIfAbsent(parent *cobra.Command, candidate *cobra.Command) {
+	if parent == nil || candidate == nil {
+		return
+	}
+	for _, existing := range parent.Commands() {
+		if existing.Name() != candidate.Name() {
+			continue
+		}
+		if isNovelScaffoldCommand(existing) && !isNovelScaffoldCommand(candidate) {
+			parent.RemoveCommand(existing)
+			parent.AddCommand(candidate)
+		}
+		return
+	}
+	parent.AddCommand(candidate)
+}
+
+func preferImplementedNovelCommands(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	byName := map[string][]*cobra.Command{}
+	for _, child := range cmd.Commands() {
+		byName[child.Name()] = append(byName[child.Name()], child)
+	}
+	for _, group := range byName {
+		var keep *cobra.Command
+		for _, child := range group {
+			if !isNovelScaffoldCommand(child) {
+				keep = child
+				break
+			}
+		}
+		if keep == nil {
+			continue
+		}
+		for _, child := range group {
+			if child != keep && isNovelScaffoldCommand(child) {
+				cmd.RemoveCommand(child)
+			}
+		}
+	}
+	for _, child := range cmd.Commands() {
+		preferImplementedNovelCommands(child)
+	}
+}
+
+// clientHooks let preserved package-local extensions configure a newly-created
+// client without editing generated code. Hooks are additive and run once per
+// client construction; they must not perform provider-specific behavior here.
+var clientHooks []func(*client.Client) error
+
+func registerClientHook(hook func(*client.Client) error) {
+	clientHooks = append(clientHooks, hook)
+}
+
+// Keeps preserved post-construction setup consistent across interactive CLI
+// and MCP clients.
+func ApplyClientHooks(c *client.Client) error {
+	for _, hook := range clientHooks {
+		if err := hook(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RootCmd returns the Cobra command tree without executing it. The MCP server
@@ -55,18 +163,46 @@ func RootCmd() *cobra.Command {
 }
 
 // Execute runs the CLI in non-interactive mode: never prompts, all values via flags or stdin.
-func Execute() error {
+// The named return feeds the deferred journal write: one site after
+// ExecuteC returns covers every outcome, including RunE errors (a
+// Cobra PostRun hook would be skipped on RunE error, so none is used).
+func Execute() (retErr error) {
 	var flags rootFlags
 	rootCmd := newRootCmd(&flags)
+	defer finalizePlatformInvocation(&flags, &retErr)
 
-	err := rootCmd.Execute()
+	executedCmd, err := rootCmd.ExecuteC()
+	var journalFailedFlag, journalSuggestedFlag string
+	defer func() {
+		journalInvocation(&flags, rootCmd, executedCmd, retErr, journalFailedFlag, journalSuggestedFlag)
+		// Derivation runs after the journal write so the entry this
+		// invocation just recorded is visible to the tail scan.
+		deriveFlagCorrections(&flags, rootCmd, executedCmd)
+	}()
+	if errors.Is(err, pflag.ErrHelp) {
+		return nil
+	}
 	if err != nil && strings.Contains(err.Error(), "unknown flag") {
 		msg := err.Error()
 		// Extract the flag name from the error message (e.g., "unknown flag: --foob")
 		if idx := strings.Index(msg, "unknown flag: "); idx >= 0 {
 			flagStr := strings.TrimSpace(msg[idx+len("unknown flag: "):])
+			// Parse-failure journal enrichment: PersistentPreRunE never
+			// runs for flag-parse failures, so this is the only place the
+			// failed flag (and its did-you-mean suggestion, when one
+			// exists) is observable. The deferred journal write picks
+			// these up.
+			journalFailedFlag = flagStr
 			if suggestion := suggestFlag(flagStr, rootCmd); suggestion != "" {
-				return fmt.Errorf("%w\nhint: did you mean --%s?", err, suggestion)
+				// Cobra already printed `Error: unknown flag: --foob` before
+				// returning; the wrap below attaches the hint to err.Error()
+				// for downstream consumers and exit-code classification, but
+				// would never reach stderr now that main.go no longer prints
+				// err. Emit the hint explicitly so the suggestion still
+				// shows up under Cobra's error line.
+				fmt.Fprintf(os.Stderr, "hint: did you mean --%s?\n", suggestion)
+				err = fmt.Errorf("%w\nhint: did you mean --%s?", err, suggestion)
+				journalSuggestedFlag = "--" + suggestion
 			}
 		}
 	}
@@ -76,28 +212,80 @@ func Execute() error {
 			return derr
 		}
 	}
+	if err != nil && isCobraUsageError(err) {
+		// Cobra/pflag pre-RunE errors (unknown flag, unknown command,
+		// missing required, etc.) never flow through usageErr() because
+		// they originate inside rootCmd.Execute() before any user RunE
+		// runs. Without this wrap, ExitCode() falls through to the
+		// default and emits 1 — clobbering the conventional code-2 for
+		// usage errors that the helpers.go contract already promises.
+		return usageErr(err)
+	}
 	return err
+}
+
+// isCobraUsageError reports whether err matches one of Cobra/pflag's
+// pre-RunE usage-error shapes. Detection is by message prefix to match
+// the same approach the unknown-flag hint path uses above; neither
+// Cobra nor pflag exports typed sentinels for these.
+//
+// Patterns are anchored to the literal punctuation Cobra and pflag
+// emit so an application's own RunE error that happens to contain the
+// substring "required flag" or "invalid argument" doesn't get
+// misclassified as a usage error.
+//
+// Patterns covered (Cobra v1.x + pflag v1.x as of 2026-05):
+//   - "unknown flag: --foo"                            (pflag)
+//   - "unknown shorthand flag: 'x' in -x"              (pflag)
+//   - "unknown command \"foo\" for ..."                (Cobra)
+//   - "required flag \"foo\" not set"                  (Cobra, single missing)
+//   - "required flag(s) \"foo\" not set"               (Cobra, multiple missing)
+//   - "flag needs an argument: --foo"                  (pflag, missing value)
+//   - "invalid argument \"x\" for \"--y\" flag: ..."   (pflag, parse failure)
+//
+// Cobra emits the singular form ("required flag") when exactly one
+// MarkFlagRequired flag is missing, and the plural form ("required
+// flag(s)") only when multiple are missing on the same command. Both
+// shapes must be anchored to avoid matching app-level errors that
+// happen to mention "required flag" as prose; the trailing space + quote
+// (`required flag "`) is the literal punctuation cobra emits.
+//
+// Returns false for nil err.
+func isCobraUsageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "unknown flag") ||
+		strings.HasPrefix(msg, "unknown shorthand flag") ||
+		strings.HasPrefix(msg, "unknown command") ||
+		strings.HasPrefix(msg, `required flag "`) ||
+		strings.HasPrefix(msg, `required flag(s) "`) ||
+		strings.HasPrefix(msg, "flag needs an argument:") ||
+		strings.HasPrefix(msg, `invalid argument "`)
 }
 
 func newRootCmd(flags *rootFlags) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "eu-tenders-pp-cli",
-		Short: `EU Tenders CLI — The entire EU public procurement corpus — €815B/year — searchable offline, with B2B lead generation for construction co…`,
-		Long: `EU Tenders CLI — The entire EU public procurement corpus — €815B/year — searchable offline, with B2B lead generation for construction co…
+		Short: `Eu Tenders CLI — The EU public procurement corpus searchable offline, with contactable leads from contract award winners.`,
+		Long: `Eu Tenders CLI — The EU public procurement corpus searchable offline, with contactable leads from contract award winners.
 
 Highlights (not in the official API docs):
-  • leads   Surface recent construction contract award winners as B2B outreach candidates — company name, project location, contract value, and construction type — so you can contact winners who need constructio…
-  • win-rate   See what fraction of contract competitions in a market go to new winners vs. incumbents — your real odds before writing a proposal.
-  • score   Get a ranked shortlist of open tenders scored by deadline urgency, contract value, keyword fit, and market openness — your morning briefing, prioritized.
-  • concentration   Compute which companies capture what share of awarded contract value in a sector and country, with HHI score and year-over-year trend.
-  • velocity   See whether a procurement market is heating up, cooling off, or spiking — weekly notice count trends over rolling windows vs. same period last year.
-  • dark-buyers   Surface contracting authorities whose calls-for-tender rarely produce public awards, or whose awards show suspiciously low winner diversity — a compliance and integrity signal.
-  • cpv-drift   See which procurement categories are growing or shrinking in a country's spending mix year-over-year — essential for platform builders and policy researchers.
-  • buyer   Build a full procurement dossier on any contracting authority: their spending cadence, CPV mix, typical contract values, and repeat winner patterns.
-  • deadline-heat   A ranked calendar of expiring tenders weighted by urgency × value / competition density — your daily prioritized view of what needs attention now.
+  • leads   Get a contactable outreach list of companies that just won construction contracts: one row per winner with email, phone, city and VAT/HRB id when TED reports them, plus contract value and what is bei…
+  • score   Rank open tenders by deadline urgency, contract value and keyword fit into a prioritized bid shortlist.
+  • buyer   Profile a contracting authority: publishing cadence, CPV mix, typical contract values and repeat winners.
+  • concentration   See which companies capture what share of awarded value in a sector and country, with an HHI concentration score.
+  • winner   Profile one company that wins public contracts: win timeline, total value, buyers, regions and latest contact data.
+  • incumbents   For one open tender, see who previously won contracts from the same buyer in the same category.
+  • deadline-heat   A ranked list of tenders closing within days, weighted by urgency, value and how few companies usually win this buyer's awards.
+  • win-rate   See per buyer how many calls for tender end in published awards and how many distinct companies win.
+  • dark-buyers   Flag contracting authorities whose tenders rarely produce public awards or keep going to one company.
+  • velocity   See whether a procurement market is heating up or cooling off with weekly notice counts versus the same window last year.
+  • cpv-drift   See which procurement categories grow or shrink year over year in a country's spending mix.
 
 Agent mode: add --agent to any command for JSON output + non-interactive mode.
-Health check: run 'eu-tenders-pp-cli doctor' to verify auth and connectivity.
+Health check: run 'eu-tenders-pp-cli doctor' to verify connectivity.
 See README.md or the bundled SKILL.md for recipes.`,
 		SilenceUsage: true,
 		Version:      version,
@@ -110,22 +298,41 @@ See README.md or the bundled SKILL.md for recipes.`,
 	rootCmd.PersistentFlags().BoolVar(&flags.plain, "plain", false, "Output as plain tab-separated text")
 	rootCmd.PersistentFlags().BoolVar(&flags.quiet, "quiet", false, "Bare output, one value per line")
 	rootCmd.PersistentFlags().StringVar(&flags.configPath, "config", "", "Config file path")
-	rootCmd.PersistentFlags().DurationVar(&flags.timeout, "timeout", 30*time.Second, "Request timeout")
+	rootCmd.PersistentFlags().StringVar(&flags.homePath, "home", "", "Root directory for config, data, state, and cache files")
+	rootCmd.PersistentFlags().DurationVar(&flags.timeout, "timeout", 60*time.Second, "Request timeout")
 	rootCmd.PersistentFlags().BoolVar(&flags.dryRun, "dry-run", false, "Show request without sending")
 	rootCmd.PersistentFlags().BoolVar(&flags.noCache, "no-cache", false, "Bypass response cache")
+	rootCmd.PersistentFlags().BoolVar(&flags.receiptEnabled, "receipt", false, "Write an atomic private run receipt")
+	rootCmd.PersistentFlags().StringVar(&flags.receiptFile, "receipt-file", "", "Override the run receipt destination")
+	rootCmd.PersistentFlags().StringVar(&flags.auditDir, "audit-dir", "", "Aggregate the receipt and index under this audit directory")
 	rootCmd.PersistentFlags().BoolVar(&flags.noInput, "no-input", false, "Disable all interactive prompts (for CI/agents)")
-	rootCmd.PersistentFlags().BoolVar(&flags.idempotent, "idempotent", false, "Treat already-existing create results as a successful no-op")
-	rootCmd.PersistentFlags().StringVar(&flags.selectFields, "select", "", "Comma-separated fields to include in output (e.g. --select id,name,status)")
-	rootCmd.PersistentFlags().BoolVar(&flags.yes, "yes", false, "Skip confirmation prompts (for agents and scripts)")
+	rootCmd.PersistentFlags().StringVar(&flags.selectFields, "select", "", "Comma-separated fields to include in output")
+	rootCmd.PersistentFlags().BoolVar(&flags.yes, "yes", false, "Skip confirmation prompts (explicit confirmation for scripts)")
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "Disable colored output")
 	rootCmd.PersistentFlags().BoolVar(&humanFriendly, "human-friendly", false, "Enable colored output and rich formatting")
-	rootCmd.PersistentFlags().BoolVar(&flags.agent, "agent", false, "Set all agent-friendly defaults (--json --compact --no-input --no-color --yes)")
-	rootCmd.PersistentFlags().StringVar(&flags.dataSource, "data-source", "auto", "Data source for read commands: auto (live with local fallback), live (API only), local (synced data only)")
-	rootCmd.PersistentFlags().StringVar(&flags.profileName, "profile", "", "Apply values from a saved profile (see 'eu-tenders-pp-cli profile list')")
+	rootCmd.PersistentFlags().BoolVar(&flags.agent, "agent", false, "Set agent-friendly output defaults (--json --compact --no-input --no-color)")
+	rootCmd.PersistentFlags().BoolVar(&flags.noLearn, "no-learn", false, "Disable the teach/recall learning loop for this invocation")
+	rootCmd.PersistentFlags().StringVar(&flags.runProfileName, "profile", "", "Apply values from a saved run profile; this does not select a client (see 'eu-tenders-pp-cli profile list')")
+	rootCmd.PersistentFlags().StringVar(&flags.clientProfileName, "client-profile", "", "Select the tenant-gated client profile (env: PRINTING_PRESS_CLIENT_PROFILE)")
+	if strings.TrimSpace(os.Getenv(mcpBoundProfileEnv)) != "" {
+		if flag := rootCmd.PersistentFlags().Lookup("client-profile"); flag != nil {
+			flag.Hidden = true
+		}
+	}
 	rootCmd.PersistentFlags().StringVar(&flags.deliverSpec, "deliver", "", "Route output to a sink: stdout (default), file:<path>, webhook:<url>")
-	rootCmd.PersistentFlags().Float64Var(&flags.rateLimit, "rate-limit", 0, "Max requests per second (0 to disable)")
+	rootCmd.PersistentFlags().Float64Var(&flags.rateLimit, "rate-limit", client.RateLimitAuto, "Max requests per second (0 to disable; default auto — pace to server rate-limit headers)")
+	if f := rootCmd.PersistentFlags().Lookup("rate-limit"); f != nil {
+		f.DefValue = "auto"
+	}
 
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		var appliedProfile *Profile
+		if err := enforceMCPBoundProfile(cmd, flags); err != nil {
+			return err
+		}
+		if _, err := cliutil.SetHomeOverride(flags.homePath); err != nil {
+			return err
+		}
 		if flags.deliverSpec != "" {
 			sink, err := ParseDeliverSink(flags.deliverSpec)
 			if err != nil {
@@ -137,20 +344,44 @@ See README.md or the bundled SKILL.md for recipes.`,
 				cmd.SetOut(io.MultiWriter(os.Stdout, flags.deliverBuf))
 			}
 		}
-		if flags.profileName != "" {
-			profile, err := GetProfile(flags.profileName)
+		if flags.runProfileName != "" {
+			profile, err := GetProfile(flags.runProfileName)
 			if err != nil {
 				return err
 			}
 			if profile == nil {
 				available := ListProfileNames()
 				if len(available) == 0 {
-					return fmt.Errorf("profile %q not found (no profiles saved yet; run '%s profile save <name> --<flag> <value>')", flags.profileName, cmd.Root().Name())
+					return fmt.Errorf("run profile %q not found (no profiles saved yet; run '%s profile save <name> --<flag> <value>')", flags.runProfileName, cmd.Root().Name())
 				}
-				return fmt.Errorf("profile %q not found; available: %s", flags.profileName, strings.Join(available, ", "))
+				return fmt.Errorf("run profile %q not found; available: %s", flags.runProfileName, strings.Join(available, ", "))
 			}
 			if err := ApplyProfileToFlags(cmd, profile); err != nil {
 				return err
+			}
+			appliedProfile = profile
+		}
+		if platformCommandNeedsGate(cmd) {
+			if err := preparePlatformSession(flags); err != nil {
+				return err
+			}
+			cmd.SetContext(platform.ContextWithSession(cmd.Context(), flags.platformSession))
+			if err := validatePlatformLegacyInputs(cmd, flags); err != nil {
+				return err
+			}
+			if err := initializePlatformReceipt(cmd, flags); err != nil {
+				return err
+			}
+			if err := adoptPlatformCommandWindow(cmd, flags); err != nil {
+				return err
+			}
+			flags.platformMetadataWriter = cmd.ErrOrStderr()
+			if err := verifyPlatformSession(cmd.Context(), flags); err != nil {
+				if platformCommandIsDoctor(cmd) {
+					flags.platformGateError = err
+				} else {
+					return err
+				}
 			}
 		}
 		if flags.agent {
@@ -163,47 +394,343 @@ See README.md or the bundled SKILL.md for recipes.`,
 			if !cmd.Flags().Changed("no-input") {
 				flags.noInput = true
 			}
-			if !cmd.Flags().Changed("yes") {
-				flags.yes = true
-			}
 			if !cmd.Flags().Changed("no-color") {
 				noColor = true
 			}
 		}
-		switch flags.dataSource {
-		case "auto", "live", "local":
-			// valid
-		default:
-			return fmt.Errorf("invalid --data-source value %q: must be auto, live, or local", flags.dataSource)
+		// Seed entity_lookups from spec.Learn.EntityLookupSeeds once per
+		// process. Skipped for framework commands that should never
+		// touch the local store (auth, doctor, help, etc.), for
+		// --no-learn invocations so deterministic agent flows don't
+		// race a background seed, and for read-only commands so a GET
+		// never runs the one-way schema migration.
+		if !noLearnActive(flags) && !shouldSkipLearnHook(cmd.CommandPath()) && commandMayWriteStore(cmd) {
+			runLearnInitOnce(cmd.Context())
+			runPlaybookInitOnce(cmd.Context())
 		}
+		flags.timeoutExplicit = timeoutExplicitFrom(cmd, appliedProfile)
+		flags.agentSource = declaredAgentSource(cmd, flags)
 		return nil
 	}
 	rootCmd.AddCommand(newDoctorCmd(flags))
+	if registeredPlatformSource != nil {
+		attachPlatformClientCommands(rootCmd, flags)
+	}
 	rootCmd.AddCommand(newAgentContextCmd(rootCmd))
 	rootCmd.AddCommand(newProfileCmd(flags))
 	rootCmd.AddCommand(newFeedbackCmd(flags))
 	rootCmd.AddCommand(newWhichCmd(flags))
 	rootCmd.AddCommand(newImportCmd(flags))
-	rootCmd.AddCommand(newAPICmd(flags))
 	rootCmd.AddCommand(newNoticesPromotedCmd(flags))
-	rootCmd.AddCommand(newVersionCliCmd())
-	rootCmd.AddCommand(newSyncCmd(flags))
-	rootCmd.AddCommand(newSearchCmd(flags))
-	rootCmd.AddCommand(newSQLCmd(flags))
-	rootCmd.AddCommand(newCPVCmd(flags))
-	rootCmd.AddCommand(newDeadlineCmd(flags))
-	rootCmd.AddCommand(newAwardsCmd(flags))
-	rootCmd.AddCommand(newLeadsCmd(flags))
-	rootCmd.AddCommand(newWinRateCmd(flags))
-	rootCmd.AddCommand(newScoreCmd(flags))
-	rootCmd.AddCommand(newConcentrationCmd(flags))
-	rootCmd.AddCommand(newVelocityCmd(flags))
-	rootCmd.AddCommand(newDarkBuyersCmd(flags))
-	rootCmd.AddCommand(newCPVDriftCmd(flags))
-	rootCmd.AddCommand(newBuyerCmd(flags))
-	rootCmd.AddCommand(newDeadlineHeatCmd(flags))
+	rootCmd.AddCommand(newVersionCmd())
+	// Self-learning loop commands. newLearnConfig (defined in
+	// learn_init.go) reads spec.Learn.TickerPatterns + Stopwords and
+	// returns a configured *entities.Config every call site shares;
+	// initLearn seeds entity_lookups from spec.Learn.EntityLookupSeeds
+	// once per process via the PersistentPreRunE hook above.
+	learnCfg := newLearnConfig()
+	rootCmd.AddCommand(newTeachCmd(flags, learnCfg))
+	rootCmd.AddCommand(newRecallCmd(flags, learnCfg))
+	rootCmd.AddCommand(newLearningsCmd(flags, learnCfg))
+	rootCmd.AddCommand(newTeachPatternCmd(flags))
+	rootCmd.AddCommand(newTeachLookupCmd(flags))
+	rootCmd.AddCommand(newTeachPlaybookCmd(flags, learnCfg))
+	rootCmd.AddCommand(newPlaybookCmd(flags, learnCfg))
+	addNovelCommandIfAbsent(rootCmd, newNovelBuyerCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelConcentrationCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelCpvDriftCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelDarkBuyersCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelDeadlineHeatCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelIncumbentsCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelLeadsCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelScoreCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelVelocityCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelWinRateCmd(flags))
+	addNovelCommandIfAbsent(rootCmd, newNovelWinnerCmd(flags))
+	for _, hook := range novelCommandHooks {
+		hook(rootCmd, flags)
+	}
+	preferImplementedNovelCommands(rootCmd)
+	// Attach the conditional platform identity command last so ordinary,
+	// promoted, and novel API-owned `whoami` commands all win the name.
+	if registeredPlatformSource != nil {
+		attachPlatformWhoamiCommand(rootCmd, flags)
+	}
 
 	return rootCmd
+}
+
+// learnHookSkipList enumerates framework command path segments that any
+// future PersistentPreRunE recall hook must NOT trigger on. Today the
+// teach/recall path is invoked explicitly by the agent, so there is
+// no consumer of this list at runtime; the skip-list ships in v1 as
+// forward-looking framework so a later auto-recall hook (modeled on
+// the granola autorefresh shape) can consult it without re-deriving
+// the set in every PR.
+//
+// Names match any segment of Cobra's CommandPath. Aliases (e.g. "sync-api")
+// are matched as-is.
+var learnHookSkipList = map[string]struct{}{
+	"auth":          {},
+	"doctor":        {},
+	"help":          {},
+	"sync":          {},
+	"profile":       {},
+	"feedback":      {},
+	"which":         {},
+	"agent-context": {},
+	"completion":    {},
+	"version":       {},
+}
+
+// shouldSkipLearnHook reports whether a recall pre-run hook should
+// short-circuit for commandPath.
+func shouldSkipLearnHook(commandPath string) bool {
+	for _, segment := range strings.Fields(commandPath) {
+		if _, skip := learnHookSkipList[segment]; skip {
+			return true
+		}
+	}
+	return false
+}
+
+// commandIsHelpInvocation reports --help / the help command so PreRun hooks
+// that open the operator store do not run as a side effect of help.
+func commandIsHelpInvocation(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Name() == "help" {
+		return true
+	}
+	if f := cmd.Flags().Lookup("help"); f != nil && f.Changed {
+		return true
+	}
+	return false
+}
+
+// commandMayWriteStore reports whether cmd is allowed to open the operator
+// store read-write from PersistentPreRunE. Read-only commands (mcp:read-only,
+// conventional GET/HEAD, doctor, help) must not run schema migration as a
+// side effect of learn/playbook init.
+func commandMayWriteStore(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if commandIsHelpInvocation(cmd) {
+		return false
+	}
+	if cmd.Name() == "doctor" {
+		return false
+	}
+	ann := cmd.Annotations
+	if ann["mcp:read-only"] == "true" {
+		return false
+	}
+	if ann["pp:parent-group"] == "true" || ann["pp:api-resource"] == "true" {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(ann["pp:method"])) {
+	case "GET", "HEAD", "OPTIONS":
+		return false
+	}
+	return true
+}
+
+// journalInvocation records the invocation in the learn journal from
+// Execute()'s single post-ExecuteC site. Fail-open by construction:
+// learn.JournalInvocation never returns an error and warns to stderr
+// at most once, so journaling can never fail or slow the command.
+//
+// Known accepted gap: for a flag-parse failure PersistentPreRunE never
+// runs, so a --home/--profile relocation was never applied and the
+// parse-failure entry lands in the default state dir rather than the
+// relocated one. Successful runs journal post-run, after the override
+// took effect, so their entries land in the relocated dir.
+func journalInvocation(flags *rootFlags, rootCmd, executed *cobra.Command, err error, failedFlag, suggestedFlag string) {
+	// The master --no-learn switch kills journaling too. On the
+	// parse-failure path the flag was never parsed into rootFlags, so
+	// the raw args are consulted as well.
+	if noLearnActive(flags) || argsDisableLearn(os.Args[1:]) {
+		return
+	}
+	exitCode := 0
+	errorClass := ""
+	if err != nil {
+		exitCode = ExitCode(err)
+		if isCobraUsageError(err) {
+			errorClass = "usage"
+		} else {
+			errorClass = "runtime"
+		}
+	}
+	// Resolve bool-ness of flags against the executed command's
+	// registry so the argv shape doesn't misread "--json list" as a
+	// valued flag. On parse failures executed may be nil or root.
+	target := executed
+	if target == nil {
+		target = rootCmd
+	}
+	isBoolFlag := func(name string) bool {
+		f := target.Flags().Lookup(name)
+		if f == nil {
+			f = target.InheritedFlags().Lookup(name)
+		}
+		if f == nil && len(name) == 1 {
+			f = target.Flags().ShorthandLookup(name)
+		}
+		return f != nil && f.Value.Type() == "bool"
+	}
+	learn.JournalInvocation(learn.JournalEntry{
+		Cmd:           journalVerbChain(rootCmd, executed),
+		ArgvShape:     learn.JournalArgvShape(os.Args[1:], isBoolFlag),
+		ExitCode:      exitCode,
+		ErrorClass:    errorClass,
+		FailedFlag:    failedFlag,
+		SuggestedFlag: suggestedFlag,
+	})
+}
+
+// journalVerbChain resolves the subcommand verb chain for the journal
+// entry. When ExecuteC resolved a command, its CommandPath is
+// authoritative. On the parse-failure path where no command resolved,
+// the chain is derived by matching os.Args tokens against registered
+// command names only — an unmatched token may be a positional value
+// and is never recorded (matching stops there, conservatively).
+func journalVerbChain(rootCmd, executed *cobra.Command) []string {
+	if executed != nil && executed != rootCmd {
+		parts := strings.Fields(executed.CommandPath())
+		if len(parts) > 1 {
+			return parts[1:]
+		}
+	}
+	var chain []string
+	current := rootCmd
+	for _, tok := range os.Args[1:] {
+		if strings.HasPrefix(tok, "-") {
+			// Flag token; a separated flag value that follows is an
+			// unmatched token and stops the walk below.
+			continue
+		}
+		next := findSubcommand(current, tok)
+		if next == nil {
+			break
+		}
+		// Record the canonical registered name (resolving aliases),
+		// never the raw token.
+		chain = append(chain, next.Name())
+		current = next
+	}
+	return chain
+}
+
+func findSubcommand(cmd *cobra.Command, name string) *cobra.Command {
+	for _, c := range cmd.Commands() {
+		if c.Name() == name || c.HasAlias(name) {
+			return c
+		}
+	}
+	return nil
+}
+
+// argsDisableLearn reports whether the raw args carry the master
+// --no-learn switch. Needed on the parse-failure journal path where
+// pflag never populated rootFlags; an explicit --no-learn=false does
+// not disable.
+func argsDisableLearn(args []string) bool {
+	for _, tok := range args {
+		if tok == "--no-learn" {
+			return true
+		}
+		if v, ok := strings.CutPrefix(tok, "--no-learn="); ok {
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "false", "0", "no":
+			default:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// learnFamilyCommands are the commands whose own invocations must
+// never trigger a derivation pass — deriving off the learn surface's
+// own journal traffic would compound into derive-on-derive noise.
+// Their entries still land in the journal; only the pass is skipped.
+var learnFamilyCommands = map[string]struct{}{
+	"teach":          {},
+	"recall":         {},
+	"learnings":      {},
+	"playbook":       {},
+	"teach-pattern":  {},
+	"teach-lookup":   {},
+	"teach-playbook": {},
+}
+
+// deriveFlagCorrections runs the post-run flag-correction derivation
+// pass from Execute()'s single post-ExecuteC site, right after the
+// invocation's own journal entry lands. Best-effort and silent: it is
+// skipped under every switch the journal honors, and any failure is
+// swallowed — derivation may never fail, slow, or add output to the
+// command that triggered it.
+func deriveFlagCorrections(flags *rootFlags, rootCmd, executed *cobra.Command) {
+	if noLearnActive(flags) || argsDisableLearn(os.Args[1:]) || learn.JournalCaptureDisabled() {
+		return
+	}
+	chain := journalVerbChain(rootCmd, executed)
+	if len(chain) > 0 {
+		if _, isLearn := learnFamilyCommands[chain[0]]; isLearn {
+			return
+		}
+	}
+	flagExists := func(name string) bool {
+		return commandTreeHasFlag(rootCmd, strings.TrimLeft(name, "-"))
+	}
+	// The opener is lazy: the pass touches SQLite only when it paired
+	// a correction, so framework-only invocations never create the
+	// learn database from this path.
+	openStore := func() (learn.CandidateStore, error) {
+		return store.Open(learnDBPath(""))
+	}
+	_ = learn.DeriveFlagCorrections(openStore, flagExists)
+}
+
+// commandTreeHasFlag reports whether any command in the tree registers
+// a flag with the given name (long name or single-letter shorthand).
+// The derivation pairing rule only heals flags that resolve nowhere —
+// a name that exists on any command, even a sibling of the failed one,
+// is a usage error rather than an alias candidate.
+func commandTreeHasFlag(cmd *cobra.Command, name string) bool {
+	if name == "" {
+		return false
+	}
+	if cmd.Flags().Lookup(name) != nil || cmd.PersistentFlags().Lookup(name) != nil {
+		return true
+	}
+	if len(name) == 1 && cmd.Flags().ShorthandLookup(name) != nil {
+		return true
+	}
+	for _, child := range cmd.Commands() {
+		if commandTreeHasFlag(child, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// ApplyProfileToFlags overlays values without setting Flag.Changed, so a
+// profile-supplied timeout must count here or binary transfers would drop
+// the whole-call bound.
+func timeoutExplicitFrom(cmd *cobra.Command, profile *Profile) bool {
+	if cmd != nil && cmd.Flags().Changed("timeout") {
+		return true
+	}
+	if profile != nil {
+		if _, ok := profile.Values["timeout"]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func ExitCode(err error) int {
@@ -220,15 +747,22 @@ func (f *rootFlags) newClient() (*client.Client, error) {
 		return nil, configErr(err)
 	}
 	c := client.New(cfg, f.timeout, f.rateLimit)
+	if f.timeoutExplicit {
+		c.SetTimeoutExplicit(true)
+	}
 	c.DryRun = f.dryRun
 	c.NoCache = f.noCache
+	if err := bindPlatformClient(c, f); err != nil {
+		return nil, err
+	}
+	if err := ApplyClientHooks(c); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
 func (f *rootFlags) printJSON(w *cobra.Command, v any) error {
-	enc := json.NewEncoder(w.OutOrStdout())
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	return printJSONFiltered(w.OutOrStdout(), v, f)
 }
 
 func (f *rootFlags) printTable(w *cobra.Command, headers []string, rows [][]string) error {
@@ -255,14 +789,4 @@ func (f *rootFlags) printTable(w *cobra.Command, headers []string, rows [][]stri
 		fmt.Fprintln(tw, line)
 	}
 	return tw.Flush()
-}
-
-func newVersionCliCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: "Print version",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("eu-tenders-pp-cli %s\n", version)
-		},
-	}
 }

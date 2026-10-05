@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
-  "generated_at": "2026-05-08T12:58:33.218033Z",
-  "printing_press_version": "4.0.6",
+  "schema_version": 2,
+  "generated_at": "2026-10-02T18:02:52.480588Z",
+  "printing_press_version": "4.33.0",
   "api_name": "eu-tenders",
   "display_name": "EU Tenders",
   "cli_name": "eu-tenders-pp-cli",
@@ -12,61 +12,146 @@
   "owner": "mathias-michel",
   "printer": "m91michel",
   "printer_name": "Mathias Michel",
-  "spec_path": "/Users/m.michel/printing-press/.runstate/cli-printing-press-b0ef89fe/runs/20260508-143927/ted-openapi.json",
+  "spec_path": "spec.json",
   "spec_format": "openapi3",
-  "spec_checksum": "sha256:9824e87b0d15125250048468f737ff14419e563ecc162549ddf74c4a140fcc4d",
-  "run_id": "20260508-143927",
+  "spec_source": "official",
+  "spec_checksum": "sha256:de55973b897a43704e5b18a5c3eea5b2d5ea790e26e9729b4736a1d0b4975c5a",
+  "run_id": "20261002-164440-b13c3738",
+  "category": "sales-and-crm",
+  "description": "The EU public procurement corpus searchable offline, with contactable leads from contract award winners.",
   "mcp_binary": "eu-tenders-pp-mcp",
   "mcp_tool_count": 1,
   "mcp_public_tool_count": 1,
   "mcp_ready": "full",
-  "category": "sales-and-crm",
+  "api_version": "3.0.0",
   "auth_type": "none",
   "novel_features": [
     {
       "name": "Construction Leads",
       "command": "leads",
-      "description": "Surface recent construction contract award winners as B2B outreach candidates \u2014 company name, project location, contract value, and construction type \u2014 so you can contact winners who need construction machinery."
+      "description": "Get a contactable outreach list of companies that just won construction contracts: one row per winner with email, phone, city and VAT/HRB id when TED reports them, plus contract value and what is being built."
     },
     {
-      "name": "Win Rate Analysis",
-      "command": "win-rate",
-      "description": "See what fraction of contract competitions in a market go to new winners vs. incumbents \u2014 your real odds before writing a proposal."
-    },
-    {
-      "name": "Opportunity Scorer",
+      "name": "Open-tender ranker",
       "command": "score",
-      "description": "Get a ranked shortlist of open tenders scored by deadline urgency, contract value, keyword fit, and market openness \u2014 your morning briefing, prioritized."
+      "description": "Rank open tenders by deadline urgency, contract value and keyword fit into a prioritized bid shortlist."
     },
     {
-      "name": "Market Concentration",
-      "command": "concentration",
-      "description": "Compute which companies capture what share of awarded contract value in a sector and country, with HHI score and year-over-year trend."
-    },
-    {
-      "name": "Procurement Velocity",
-      "command": "velocity",
-      "description": "See whether a procurement market is heating up, cooling off, or spiking \u2014 weekly notice count trends over rolling windows vs. same period last year."
-    },
-    {
-      "name": "Dark Buyers Detector",
-      "command": "dark-buyers",
-      "description": "Surface contracting authorities whose calls-for-tender rarely produce public awards, or whose awards show suspiciously low winner diversity \u2014 a compliance and integrity signal."
-    },
-    {
-      "name": "CPV Drift",
-      "command": "cpv-drift",
-      "description": "See which procurement categories are growing or shrinking in a country's spending mix year-over-year \u2014 essential for platform builders and policy researchers."
-    },
-    {
-      "name": "Buyer Profile",
+      "name": "Buyer dossier",
       "command": "buyer",
-      "description": "Build a full procurement dossier on any contracting authority: their spending cadence, CPV mix, typical contract values, and repeat winner patterns."
+      "description": "Profile a contracting authority: publishing cadence, CPV mix, typical contract values and repeat winners."
     },
     {
-      "name": "Deadline Heat",
+      "name": "Market concentration",
+      "command": "concentration",
+      "description": "See which companies capture what share of awarded value in a sector and country, with an HHI concentration score."
+    },
+    {
+      "name": "Winner dossier",
+      "command": "winner",
+      "description": "Profile one company that wins public contracts: win timeline, total value, buyers, regions and latest contact data."
+    },
+    {
+      "name": "Tender incumbents",
+      "command": "incumbents",
+      "description": "For one open tender, see who previously won contracts from the same buyer in the same category."
+    },
+    {
+      "name": "Deadline heat",
       "command": "deadline-heat",
-      "description": "A ranked calendar of expiring tenders weighted by urgency \u00d7 value / competition density \u2014 your daily prioritized view of what needs attention now."
+      "description": "A ranked list of tenders closing within days, weighted by urgency, value and how few companies usually win this buyer's awards."
+    },
+    {
+      "name": "Buyer award rate",
+      "command": "win-rate",
+      "description": "See per buyer how many calls for tender end in published awards and how many distinct companies win."
+    },
+    {
+      "name": "Dark buyers",
+      "command": "dark-buyers",
+      "description": "Flag contracting authorities whose tenders rarely produce public awards or keep going to one company."
+    },
+    {
+      "name": "Procurement velocity",
+      "command": "velocity",
+      "description": "See whether a procurement market is heating up or cooling off with weekly notice counts versus the same window last year."
+    },
+    {
+      "name": "CPV drift",
+      "command": "cpv-drift",
+      "description": "See which procurement categories grow or shrink year over year in a country's spending mix."
     }
-  ]
+  ],
+  "novel_features_built": [
+    {
+      "name": "Construction Leads",
+      "command": "leads",
+      "description": "Get a contactable outreach list of companies that just won construction contracts: one row per winner with email, phone, city and VAT/HRB id when TED reports them, plus contract value and what is being built."
+    },
+    {
+      "name": "Open-tender ranker",
+      "command": "score",
+      "description": "Rank open tenders by deadline urgency, contract value and keyword fit into a prioritized bid shortlist."
+    },
+    {
+      "name": "Buyer dossier",
+      "command": "buyer",
+      "description": "Profile a contracting authority: publishing cadence, CPV mix, typical contract values and repeat winners."
+    },
+    {
+      "name": "Market concentration",
+      "command": "concentration",
+      "description": "See which companies capture what share of awarded value in a sector and country, with an HHI concentration score."
+    },
+    {
+      "name": "Winner dossier",
+      "command": "winner",
+      "description": "Profile one company that wins public contracts: win timeline, total value, buyers, regions and latest contact data."
+    },
+    {
+      "name": "Tender incumbents",
+      "command": "incumbents",
+      "description": "For one open tender, see who previously won contracts from the same buyer in the same category."
+    },
+    {
+      "name": "Deadline heat",
+      "command": "deadline-heat",
+      "description": "A ranked list of tenders closing within days, weighted by urgency, value and how few companies usually win this buyer's awards."
+    },
+    {
+      "name": "Buyer award rate",
+      "command": "win-rate",
+      "description": "See per buyer how many calls for tender end in published awards and how many distinct companies win."
+    },
+    {
+      "name": "Dark buyers",
+      "command": "dark-buyers",
+      "description": "Flag contracting authorities whose tenders rarely produce public awards or keep going to one company."
+    },
+    {
+      "name": "Procurement velocity",
+      "command": "velocity",
+      "description": "See whether a procurement market is heating up or cooling off with weekly notice counts versus the same window last year."
+    },
+    {
+      "name": "CPV drift",
+      "command": "cpv-drift",
+      "description": "See which procurement categories grow or shrink year over year in a country's spending mix."
+    }
+  ],
+  "verify": {
+    "mode": "mock",
+    "pass_rate": 100,
+    "passed": 42,
+    "total": 42,
+    "data_pipeline": true,
+    "verdict": "PASS"
+  },
+  "scorecard": {
+    "steinberger": {
+      "percentage": 87,
+      "grade": "A",
+      "total": 87
+    }
+  }
 }

@@ -1,0 +1,512 @@
+{
+  "notices": [
+    {
+      "place-of-performance": [
+        "DE300",
+        "DEU",
+        "DE300",
+        "DEU"
+      ],
+      "deadline-receipt-tender-date-lot": [
+        "2026-11-04+01:00"
+      ],
+      "title-proc": {
+        "deu": "Landschaftsgärtnerische Arbeiten"
+      },
+      "notice-type": "cn-standard",
+      "publication-number": "679227-2026",
+      "estimated-value-lot": [
+        "1036573.53"
+      ],
+      "estimated-value-cur-proc": "EUR",
+      "place-of-performance-city-proc": [
+        "Berlin- Johannisthal"
+      ],
+      "total-value": 1036573.53,
+      "buyer-country": [
+        "DEU"
+      ],
+      "procedure-type": "open",
+      "classification-cpv": [
+        "45112700",
+        "45112700"
+      ],
+      "publication-date": "2026-10-02+02:00",
+      "buyer-name": {
+        "deu": [
+          "Land Berlin, vertreten durch das Bezirksamt Treptow-Köpenick von Berlin"
+        ]
+      },
+      "estimated-value-proc": "1036573.53",
+      "notice-title": {
+        "hun": "Németország – Tereprendezési munkák – Landschaftsgärtnerische Arbeiten",
+        "lav": "Vācija – Ainavas veidošana – Landschaftsgärtnerische Arbeiten",
+        "swe": "Tyskland – Landskapsplanering – Landschaftsgärtnerische Arbeiten",
+        "gle": "An Ghearmáin – Landscaping work – Landschaftsgärtnerische Arbeiten",
+        "ell": "Γερμανία – Εργασίες διαμόρφωσης τοπίου – Landschaftsgärtnerische Arbeiten",
+        "spa": "Alemania – Trabajos de paisajismo – Landschaftsgärtnerische Arbeiten",
+        "est": "Saksamaa – Maastikukujundustööd – Landschaftsgärtnerische Arbeiten",
+        "nld": "Duitsland – Werkzaamheden voor landschapsarchitectuur – Landschaftsgärtnerische Arbeiten",
+        "fin": "Saksa – Maisemarakennustyöt – Landschaftsgärtnerische Arbeiten",
+        "pol": "Niemcy – Roboty w zakresie kształtowania terenu – Landschaftsgärtnerische Arbeiten",
+        "hrv": "Njemačka – Radovi krajobraznog uređenja – Landschaftsgärtnerische Arbeiten",
+        "ces": "Německo – Krajinné úpravy – Landschaftsgärtnerische Arbeiten",
+        "dan": "Tyskland – Arbejder i forbindelse med landskabsarkitektur – Landschaftsgärtnerische Arbeiten",
+        "ron": "Germania – Lucrări de arhitectură peisagistică – Landschaftsgärtnerische Arbeiten",
+        "por": "Alemanha – Trabalhos de paisagismo – Landschaftsgärtnerische Arbeiten",
+        "slk": "Nemecko – Terénne úpravy – Landschaftsgärtnerische Arbeiten",
+        "fra": "Allemagne – Travaux d'aménagement paysager – Landschaftsgärtnerische Arbeiten",
+        "mlt": "Il-Ġermanja – Xogħol ta’ l-irranġar tal-pajsaġġ – Landschaftsgärtnerische Arbeiten",
+        "deu": "Deutschland – Landschaftsgärtnerische Arbeiten – Landschaftsgärtnerische Arbeiten",
+        "lit": "Vokietija – Kraštovaizdžio darbai – Landschaftsgärtnerische Arbeiten",
+        "ita": "Germania – Lavori di architettura paesaggistica – Landschaftsgärtnerische Arbeiten",
+        "bul": "Гepмaния – Строителни работи, свързани с озеленяването – Landschaftsgärtnerische Arbeiten",
+        "slv": "Nemčija – Krajinsko oblikovanje – Landschaftsgärtnerische Arbeiten",
+        "eng": "Germany – Landscaping work – Landschaftsgärtnerische Arbeiten"
+      },
+      "buyer-city": {
+        "mul": [
+          "Berlin"
+        ]
+      },
+      "buyer-email": [
+        "buyer-berlin@example.com"
+      ],
+      "title-lot": {
+        "deu": [
+          "Landschaftsgärtnerische Arbeiten"
+        ]
+      }
+    },
+    {
+      "notice-type": "can-standard",
+      "publication-number": "679898-2026",
+      "result-value-notice": "5431556.8",
+      "winner-country": [
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA"
+      ],
+      "winner-country-sub": [
+        "FRL03",
+        "FRL03",
+        "FRL05",
+        "FRL05",
+        "FRL03",
+        "FRL05",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03"
+      ],
+      "total-value": 5431556.8,
+      "winner-identifier": [
+        "48455001700046",
+        "91789045100011",
+        "85150761600015",
+        "79059005300043",
+        "49284433700047",
+        "31554917000027",
+        "54210780003943",
+        "31752788500030",
+        "35168347900049",
+        "43940092000039",
+        "38807757000033",
+        "340632140000109"
+      ],
+      "publication-date": "2026-10-02+02:00",
+      "organisation-country-tenderer": [
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA"
+      ],
+      "previous-notice-id-proc": [
+        "d9a15df9-4b33-4073-a701-ff64eab14c84-01"
+      ],
+      "buyer-city": {
+        "mul": [
+          "Sophia antipolis cedex"
+        ]
+      },
+      "buyer-email": [
+        "buyer-casablanca@example.com"
+      ],
+      "place-of-performance": [
+        "FRL03",
+        "FRA",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRL03",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA",
+        "FRA"
+      ],
+      "title-proc": {
+        "fra": "Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2"
+      },
+      "winner-city": [
+        "NICE",
+        "NICE",
+        "LA SEYNE SUR MER",
+        "LA VALETTE DU VAR",
+        "SAINT LAURENT DU VAR",
+        "PUGET SUR ARGENS",
+        "VALBONNE",
+        "NICE",
+        "ANTIBES",
+        "GRASSE",
+        "DRAP",
+        "VILLENEUVE LOUBET"
+      ],
+      "place-of-performance-city-proc": [
+        "BIOT"
+      ],
+      "winner-size": [
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "medium",
+        "large",
+        "medium",
+        "large",
+        "medium",
+        "medium",
+        "medium"
+      ],
+      "buyer-country": [
+        "FRA"
+      ],
+      "tender-value": [
+        "2851117.6",
+        "140000",
+        "74376",
+        "101595.6",
+        "56052.7",
+        "217494.75",
+        "54027.5",
+        "19000",
+        "529236.75",
+        "659864.22",
+        "498900",
+        "122984.18",
+        "106907.5"
+      ],
+      "procedure-type": "open",
+      "classification-cpv": [
+        "45262500",
+        "44112000",
+        "34312500",
+        "45420000",
+        "45421152",
+        "45432100",
+        "45421000",
+        "44316500",
+        "45421100",
+        "45421148",
+        "45442100",
+        "45313000",
+        "09310000",
+        "45330000",
+        "32400000",
+        "90611000",
+        "45112710",
+        "45262500",
+        "45261420",
+        "45420000",
+        "45421152",
+        "45432100",
+        "45421000",
+        "45421100",
+        "45442100",
+        "45313000",
+        "45310000",
+        "45330000",
+        "45233000",
+        "45112710",
+        "44112000",
+        "34312500",
+        "44316500",
+        "45421148",
+        "09310000",
+        "90611000",
+        "32400000"
+      ],
+      "buyer-name": {
+        "fra": [
+          "Agglomération Sophia Antipolis"
+        ]
+      },
+      "organisation-name-tenderer": {
+        "fra": [
+          "TRIVIERO CONSTRUCTION",
+          "AMAR ISOLATION",
+          "SARL BRM PERE ET FILS",
+          "SARL CARRO BTP",
+          "SARL CLIBAT AMENAGEMENT",
+          "SAS REGIS PERE ET FILS",
+          "OTIS",
+          "SARL RPM BALLY",
+          "EIFFAGE ENERGIE SYSTEMES COTE D'AZUR",
+          "SAS STME",
+          "SARL NARDELLI TP",
+          "SAS BOTANICA JARDINS SERVICES"
+        ]
+      },
+      "winner-name": {
+        "fra": [
+          "TRIVIERO CONSTRUCTION",
+          "AMAR ISOLATION",
+          "SARL BRM PERE ET FILS",
+          "SARL CARRO BTP",
+          "SARL CLIBAT AMENAGEMENT",
+          "SAS REGIS PERE ET FILS",
+          "SARL RPM BALLY",
+          "OTIS",
+          "EIFFAGE ENERGIE SYSTEMES COTE D'AZUR",
+          "SAS STME",
+          "SARL NARDELLI TP",
+          "SAS BOTANICA JARDINS SERVICES",
+          "SAS REGIS PERE ET FILS"
+        ]
+      },
+      "winner-post-code": [
+        "06205",
+        "06200",
+        "83500",
+        "83160",
+        "06700",
+        "83480",
+        "06560",
+        "06200",
+        "06600",
+        "06130",
+        "06340",
+        "06270"
+      ],
+      "result-value-cur-notice": "EUR",
+      "notice-title": {
+        "hun": "Franciaország – Kőműves és falazási munka – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "lav": "Francija – Mūrnieku darbi un ķieģeļu sienu mūrēšana – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "swe": "Frankrike – Murning och tegelläggning – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "gle": "An Fhrainc – Masonry and bricklaying work – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "ell": "Γαλλία – Εργασίες τοιχοποιίας και οπτοπλινθοδομών – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "spa": "Francia – Trabajos de mampostería y albañilería – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "est": "Prantsusmaa – Müürsepatööd ja müüriladumine – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "nld": "Frankrijk – Metselwerk in baksteen en bouwsteen – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "fin": "Ranska – Tiilimuuraustyöt ja muut muuraustyöt – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "pol": "Francja – Roboty murarskie i murowe – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "hrv": "Francuska – Zidanje i zidanje opekom – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "ces": "Francie – Kamenické a zednické práce – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "dan": "Frankrig – Murværks- og murerarbejder – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "ron": "Franţa – Lucrări de zidărie şi de zidire – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "por": "França – Obras de alvenaria e assentamento de tijolos – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "slk": "Francúzsko – Murovanie a murárske práce – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "fra": "France – Travaux de maçonnerie et de briquetage – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "mlt": "Franza – Xogħol fil-ġebel u l-bricks – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "deu": "Frankreich – Maurerarbeiten – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "lit": "Prancūzija – Mūrijimas ir plytų mūrijimas – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "ita": "Francia – Lavori edili e di muratura – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "bul": "Фpaнция – Зидарски и каменоделски работи – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "slv": "Francija – Zidarska dela – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2",
+        "eng": "France – Masonry and bricklaying work – Construction d'un centre technique du Cycle de l'Eau à Biot - Phase 2"
+      },
+      "title-lot": {
+        "fra": [
+          "Lot n°02 - Structure - Maçonnerie",
+          "Lot n°03 - Etanchéité",
+          "Lot n°04 - Menuiseries extérieures",
+          "Lot n°05 - Cloisons - Doublage - Faux plafonds",
+          "Lot n°06 - Revêtements des sols - Faïence",
+          "Lot n°07 - Menuiseries intérieures",
+          "Lot n°08 - Serrurerie - Portes - Portails",
+          "Lot n°09 - Peintures intérieures et extérieures",
+          "Lot n°10 - Ascenseur",
+          "Lot n°11 - Electricité",
+          "Lot n°12 - CVC Plomberie",
+          "Lot n°13 - Voirie Réseaux Divers",
+          "Lot n°14 - Espaces verts"
+        ]
+      }
+    },
+    {
+      "notice-type": "can-standard",
+      "publication-number": "680471-2026",
+      "winner-country": [
+        "DEU",
+        "DEU",
+        "DEU"
+      ],
+      "winner-country-sub": [
+        "DE718",
+        "DE126",
+        "DE717"
+      ],
+      "winner-email": [
+        "winner-markierung@example.com",
+        "winner-secutec@example.com",
+        "winner-bunte@example.com"
+      ],
+      "winner-identifier": [
+        "DE313414584",
+        "DE 140211424",
+        "DE 116961471"
+      ],
+      "publication-date": "2026-10-02+02:00",
+      "organisation-country-tenderer": [
+        "DEU",
+        "DEU",
+        "DEU"
+      ],
+      "buyer-city": {
+        "mul": [
+          "Darmstadt"
+        ]
+      },
+      "buyer-email": [
+        "buyer-darmstadt@example.com"
+      ],
+      "place-of-performance": [
+        "DEU",
+        "DEU",
+        "DEU",
+        "DEU"
+      ],
+      "title-proc": {
+        "deu": "B44, OU Dornheim KVP und Erdbau"
+      },
+      "winner-city": [
+        "Wehrheim",
+        "Mannheim",
+        "Kelsterbach"
+      ],
+      "winner-size": [
+        "small",
+        "medium",
+        "large"
+      ],
+      "buyer-country": [
+        "DEU"
+      ],
+      "tender-value": [
+        "-1",
+        "-1",
+        "-1"
+      ],
+      "procedure-type": "open",
+      "classification-cpv": [
+        "45233124",
+        "45233124",
+        "45233124",
+        "45233124"
+      ],
+      "organisation-tel-tenderer": [
+        "+49 6081576170",
+        "+49 62187553-0",
+        "+49 6107719510"
+      ],
+      "buyer-name": {
+        "deu": [
+          "Hessen Mobil, Straßen- und Verkehrsmanagement, Darmstadt"
+        ]
+      },
+      "organisation-name-tenderer": {
+        "deu": [
+          "SP - Fahrbahnmarkierung GmbH",
+          "SECUTEC GmbH",
+          "Johann Bunte"
+        ]
+      },
+      "winner-name": {
+        "deu": [
+          "Johann Bunte",
+          "SECUTEC GmbH",
+          "SP - Fahrbahnmarkierung GmbH"
+        ]
+      },
+      "winner-post-code": [
+        "61273",
+        "68219",
+        "65451"
+      ],
+      "result-value-cur-notice": "EUR",
+      "notice-title": {
+        "hun": "Németország – Országos főútvonal építése – B44, OU Dornheim KVP und Erdbau",
+        "lav": "Vācija – Ceļa atzara būvdarbi – B44, OU Dornheim KVP und Erdbau",
+        "swe": "Tyskland – Anläggningsarbeten för huvudvägar – B44, OU Dornheim KVP und Erdbau",
+        "gle": "An Ghearmáin – Trunk road construction work – B44, OU Dornheim KVP und Erdbau",
+        "ell": "Γερμανία – Κατασκευαστικές εργασίες για κύριες οδικές αρτηρίες – B44, OU Dornheim KVP und Erdbau",
+        "spa": "Alemania – Trabajos de construcción de carreteras principales – B44, OU Dornheim KVP und Erdbau",
+        "est": "Saksamaa – Magistraalteede ehitustööd – B44, OU Dornheim KVP und Erdbau",
+        "nld": "Duitsland – Bouwen van hoofdweg – B44, OU Dornheim KVP und Erdbau",
+        "fin": "Saksa – Runkoteiden rakennustyöt – B44, OU Dornheim KVP und Erdbau",
+        "pol": "Niemcy – Roboty budowlane w zakresie arterii drogowych – B44, OU Dornheim KVP und Erdbau",
+        "hrv": "Njemačka – Građevinski radovi na magistralnoj cesti – B44, OU Dornheim KVP und Erdbau",
+        "ces": "Německo – Výstavba hlavních silnic – B44, OU Dornheim KVP und Erdbau",
+        "dan": "Tyskland – Anlægsarbejde: primærveje – B44, OU Dornheim KVP und Erdbau",
+        "ron": "Germania – Lucrări de construcţii de artere principale – B44, OU Dornheim KVP und Erdbau",
+        "por": "Alemanha – Construção de estrada nacional – B44, OU Dornheim KVP und Erdbau",
+        "slk": "Nemecko – Stavebné práce na stavbe hlavných dopravných ciest – B44, OU Dornheim KVP und Erdbau",
+        "fra": "Allemagne – Travaux de construction d'artères de grande circulation – B44, OU Dornheim KVP und Erdbau",
+        "mlt": "Il-Ġermanja – Xogħol ta' kostruzzjoni ta' trunk road – B44, OU Dornheim KVP und Erdbau",
+        "deu": "Deutschland – Bau von Fernstraßen – B44, OU Dornheim KVP und Erdbau",
+        "lit": "Vokietija – Magistralinių kelių statybos darbai – B44, OU Dornheim KVP und Erdbau",
+        "ita": "Germania – Lavori di costruzione di strade di grande comunicazione – B44, OU Dornheim KVP und Erdbau",
+        "bul": "Гepмaния – Строителни и монтажни работи на пътища I клас – B44, OU Dornheim KVP und Erdbau",
+        "slv": "Nemčija – Gradbena dela na magistralni cesti – B44, OU Dornheim KVP und Erdbau",
+        "eng": "Germany – Trunk road construction work – B44, OU Dornheim KVP und Erdbau"
+      },
+      "title-lot": {
+        "deu": [
+          "Erdbau und drei KVP's",
+          "Verkehrssicherung KVP's",
+          "Markierung KVP's"
+        ]
+      }
+    }
+  ],
+  "totalNoticeCount": 3,
+  "iterationNextToken": null,
+  "timedOut": false
+}

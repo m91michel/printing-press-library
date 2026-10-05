@@ -6,12 +6,30 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/client"
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/cliutil"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// Hand-coded auth flows can report credentials that are intentionally not
+// represented by the generated Config fields. Assign this from a same-package
+// author file after generation. This is a presence signal only; custom flows
+// own their transport and credential-probe validation.
+var doctorAuthConfiguredHook func() (bool, string)
+
+func doctorAuthConfiguredState(cfg *config.Config) (bool, string) {
+	if cfg != nil && cfg.CredentialConfigured() {
+		return true, cfg.AuthSource
+	}
+	if doctorAuthConfiguredHook != nil {
+		return doctorAuthConfiguredHook()
+	}
+	return false, ""
+}
 
 // looksLikeDoctorInterstitial reports whether the response body matches a known
 // bot-detection challenge page (Cloudflare, Akamai, Vercel, AWS WAF, DataDome,
@@ -57,6 +75,98 @@ func looksLikeDoctorInterstitial(body []byte) string {
 	return ""
 }
 
+func doctorBodyLooksLikeHTML(body []byte) bool {
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	if len(lower) > 2048 {
+		lower = lower[:2048]
+	}
+	return strings.HasPrefix(lower, "<!doctype html") || strings.HasPrefix(lower, "<html") ||
+		(strings.HasPrefix(lower, "<") && (strings.Contains(lower, "<html") || strings.Contains(lower, "<body") || strings.Contains(lower, "<head") || strings.Contains(lower, "<title")))
+}
+
+// suggestReadCommand walks the Cobra tree to find an endpoint-mirror command
+// an operator can run to confirm credentials work end-to-end. Picks the
+// first leaf that (a) carries the `pp:endpoint` annotation, so it actually
+// dials the API rather than reading a local file like `feedback list` or
+// `profile list`; (b) has a list/get verb; (c) takes no positional
+// arguments; and (d) has no required flags (`pp:requires-input`), so a
+// bare invocation actually dials instead of printing help and exiting 0.
+// Returns the command path (e.g. "issues list") or "" when no such
+// command exists — common in mutation-only CLIs and in CLIs where every
+// read command has required input.
+func suggestReadCommand(root *cobra.Command) string {
+	if root == nil {
+		return ""
+	}
+	var found string
+	var walk func(*cobra.Command, []string)
+	walk = func(cmd *cobra.Command, path []string) {
+		if found != "" {
+			return
+		}
+		for _, child := range cmd.Commands() {
+			childPath := append(append([]string{}, path...), child.Name())
+			if isSuggestableReadLeaf(child) {
+				found = strings.Join(childPath, " ")
+				return
+			}
+			// Recurse even into Hidden grouping commands because their
+			// descendants can remain runnable and discoverable by direct
+			// invocation. isSuggestableReadLeaf still rejects a leaf that
+			// is itself Hidden.
+			walk(child, childPath)
+			if found != "" {
+				return
+			}
+		}
+	}
+	walk(root, nil)
+	return found
+}
+
+const requiresInputAnnotation = "pp:requires-input"
+
+func isSuggestableReadLeaf(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Hidden || cmd.HasSubCommands() || !cmd.Runnable() {
+		return false
+	}
+	// Only endpoint-mirror commands count; framework commands like
+	// `feedback list` and `profile list` read local files and would
+	// recreate the false-confidence failure mode the suggestion is
+	// supposed to avoid.
+	if cmd.Annotations["pp:endpoint"] == "" {
+		return false
+	}
+	// Required non-positional flags print help and exit 0 in default
+	// mode. Suggesting one would look like a successful token check.
+	if cmd.Annotations[requiresInputAnnotation] != "" {
+		return false
+	}
+	verb := strings.ToLower(strings.SplitN(cmd.Use, " ", 2)[0])
+	if verb != "list" && verb != "get" {
+		return false
+	}
+	// Endpoint commands with positional path params advertise them in
+	// Use as `<id>` (required) or `[id]` (optional). The runtime body
+	// rejects empty args by printing help, so suggesting one would not
+	// actually exercise the token — reject before the Args probe below.
+	if strings.ContainsAny(cmd.Use, "<[") {
+		return false
+	}
+	// Probe the Args validator with an empty positional-arg list. A nil
+	// validator accepts anything (including zero args); a non-nil validator
+	// that returns nil for [] accepts zero args. Either qualifies — the
+	// suggestion `<cli> list` is then a complete command.
+	if cmd.Args == nil {
+		return true
+	}
+	return cmd.Args(cmd, []string{}) == nil
+}
+
 func newDoctorCmd(flags *rootFlags) *cobra.Command {
 	var failOn string
 	cmd := &cobra.Command{
@@ -64,9 +174,31 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 		Short: "Check CLI health",
 		Example: `  eu-tenders-pp-cli doctor
   eu-tenders-pp-cli doctor --json
-  eu-tenders-pp-cli doctor --fail-on warn`,
+  eu-tenders-pp-cli doctor --fail-on warn
+  eu-tenders-pp-cli doctor --fail-on stale`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if dryRunOK(flags) {
+				return writeDryRun(cmd.OutOrStdout(), flags, "doctor")
+			}
+			if registeredPlatformSource != nil {
+				if flags.platformSession == nil {
+					return errors.New("verified client profile session is required")
+				}
+				report, err := platformDoctorV2Report(cmd.Context(), flags.platformSession)
+				if err != nil {
+					return err
+				}
+				if err := flags.printJSON(cmd, report); err != nil {
+					return err
+				}
+				return flags.platformGateError
+			}
 			report := map[string]any{}
+			pathsReport := collectPathsReport()
+			report["paths"] = pathsReport
+			if warning := pathsWarning(pathsReport); warning != "" {
+				report["paths_warning"] = warning
+			}
 
 			// Check config
 			cfg, err := config.Load(flags.configPath)
@@ -87,11 +219,12 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 			//
 			// The doctor uses the same client every other command uses --
 			// flags.newClient() returns a *client.Client wrapping whatever
-			// transport the spec declared (Surf for browser-chrome, stdlib
-			// for standard). A separate stdlib http.Client would silently
-			// bypass that choice and report false negatives against
-			// Cloudflare-fronted, Akamai-fronted, or otherwise bot-detected
-			// sites. By going through flags.newClient(), the doctor's
+			// transport the spec declared (the Chrome-compatible transport
+			// for browser-chrome, stdlib for standard). A separate stdlib
+			// http.Client would silently bypass that choice and report
+			// false negatives against Cloudflare-fronted, Akamai-fronted,
+			// or otherwise bot-detected sites. By going through
+			// flags.newClient(), the doctor's
 			// reachability verdict matches what real commands experience.
 			if cfg != nil && cfg.BaseURL != "" {
 				c, clientErr := flags.newClient()
@@ -99,7 +232,10 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					report["api"] = fmt.Sprintf("client init error: %s", clientErr)
 				} else {
 					// Step 1: Basic reachability via the configured transport.
-					reachBody, reachErr := c.Get("/", nil)
+					// Health paths have no response_format field, so opt this
+					// probe into HTML: a 200 HTML homepage is reachable, and
+					// a Cloudflare challenge page can still be classified.
+					reachBody, reachErr := c.GetWithHeaders(cmd.Context(), "/", nil, map[string]string{client.HTMLResponseHeader: "true"})
 					var reachAPIErr *client.APIError
 					switch {
 					case reachErr == nil:
@@ -108,6 +244,8 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 						// 200 with a JS challenge page.
 						if vendor := looksLikeDoctorInterstitial(reachBody); vendor != "" {
 							report["api"] = fmt.Sprintf("blocked by %s interstitial — the configured transport reached the wall. Try a different network, wait for the IP-level rate limit to clear, or check that the browser-chrome transport is bound correctly.", vendor)
+						} else if doctorBodyLooksLikeHTML(reachBody) {
+							report["api"] = "reachable (HTML body at /)"
 						} else {
 							report["api"] = "reachable"
 						}
@@ -136,38 +274,31 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					} else if reachErr != nil && !errors.As(reachErr, &reachAPIErr) {
 						report["credentials"] = "skipped (API unreachable)"
 					} else {
-						verifyPath := "/"
-						authParams := map[string]string{}
-						authHeaders := map[string]string{}
-						authHeaders["Authorization"] = authHeader
-						authHeaders["User-Agent"] = "eu-tenders-pp-cli"
-						_, authErr := c.GetWithHeaders(verifyPath, authParams, authHeaders)
-						var authAPIErr *client.APIError
-						switch {
-						case authErr == nil:
-							report["credentials"] = "valid"
-						case errors.As(authErr, &authAPIErr):
-							switch {
-							case authAPIErr.StatusCode == 401 || authAPIErr.StatusCode == 403:
-								// The probe hit the bare base URL because no auth.verify_path
-								// is configured in the spec. Many APIs return 401/403 from a
-								// bare versioned root regardless of token validity (the path
-								// isn't routed but the gateway still demands credentials).
-								// Don't claim invalid without certainty — set verify_path to
-								// a known-good authenticated GET (e.g. /me, /v1/account, /user)
-								// for a definitive verdict.
-								report["credentials"] = fmt.Sprintf("inconclusive (HTTP %d from base URL — set auth.verify_path in spec for a definitive probe)", authAPIErr.StatusCode)
-							default:
-								// Non-auth HTTP error (404, 500, etc.) — don't blame credentials
-								report["credentials"] = fmt.Sprintf("ok (HTTP %d from %s, but auth was accepted)", authAPIErr.StatusCode, verifyPath)
-							}
-						default:
-							report["credentials"] = fmt.Sprintf("error: %s", authErr)
+						suggestion := suggestReadCommand(cmd.Root())
+						if suggestion != "" {
+							report["credentials"] = fmt.Sprintf("present, not verified. Run `%s %s` to confirm the token works end-to-end.", "eu-tenders-pp-cli", suggestion)
+						} else {
+							report["credentials"] = "present, not verified. Run any read command to confirm the token works end-to-end."
 						}
 					}
 				}
 			} else if cfg != nil && cfg.BaseURL == "" {
 				report["api"] = "not configured (set base_url in config file)"
+			}
+
+			// Verify mode state. Surfaced so an operator who unintentionally
+			// inherits PRINTING_PRESS_VERIFY=1 (parent shell, CI runner, container
+			// image) detects the foot-gun without inspecting a response body.
+			// Pairs with the synthetic envelope's verify_noop / reason literals
+			// as a second diagnosis anchor.
+			if cliutil.IsVerifyEnv() {
+				if cliutil.IsVerifyLiveHTTPEnv() {
+					report["verify_mode"] = "INFO ACTIVE — live HTTP opt-in (mutating verbs dial out)"
+				} else {
+					report["verify_mode"] = "INFO ACTIVE — mutating HTTP verbs short-circuit (PRINTING_PRESS_VERIFY=1; no network calls for DELETE/POST/PUT/PATCH)"
+				}
+			} else {
+				report["verify_mode"] = "normal operation"
 			}
 
 			report["version"] = version
@@ -185,6 +316,9 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 				{"config", "Config"},
 				{"auth", "Auth"},
 				{"env_vars", "Env Vars"},
+				{"verify_mode", "Verify Mode"},
+				{"paths_warning", "Paths"},
+				{"credentials_location_warning", "Credentials Storage"},
 				{"api", "API"},
 				{"credentials", "Credentials"},
 			}
@@ -196,19 +330,24 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 				s := fmt.Sprintf("%v", v)
 				indicator := green("OK")
 				switch {
+				case strings.HasPrefix(s, "WARN"):
+					indicator = yellow("WARN")
 				case strings.HasPrefix(s, "INFO"):
 					indicator = yellow("INFO")
 				case strings.HasPrefix(s, "ERROR"):
 					indicator = red("FAIL")
+				case strings.HasPrefix(s, "refused:"):
+					indicator = red("FAIL")
 				case strings.HasPrefix(s, "optional"):
 					// Optional-auth CLI with no key set — informational, not a failure.
 					indicator = yellow("INFO")
-				case strings.HasPrefix(s, "inconclusive"):
-					// The credential probe could not produce a definitive verdict
-					// (typically because the bare base URL returns 401/403 even for
-					// valid tokens). Surface as WARN, not FAIL — the user's actual
-					// commands will reveal a real auth failure if one exists.
+				case strings.Contains(s, "scope-limited"):
 					indicator = yellow("WARN")
+				case strings.Contains(s, "not verified"):
+					// "present, not verified" — credentials are loaded but no
+					// probe ran. Informational, not a warning; a clean config
+					// shouldn't render yellow WARN in CI dashboards.
+					indicator = yellow("INFO")
 				case strings.Contains(s, "error") || strings.Contains(s, "not configured") || strings.Contains(s, "unreachable") || strings.Contains(s, "invalid") || strings.Contains(s, "missing"):
 					indicator = red("FAIL")
 				case s == "not required":
@@ -220,40 +359,173 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 				fmt.Fprintf(w, "  %s %s: %s\n", indicator, ck.label, s)
 			}
 			// Print info keys without status indicator
-			for _, key := range []string{"config_path", "base_url", "auth_source", "version"} {
+			for _, key := range []string{"config_path", "base_url", "auth_source", "auth_refusals", "credentials_location", "version"} {
 				if v, ok := report[key]; ok {
 					fmt.Fprintf(w, "  %s: %v\n", key, v)
 				}
 			}
 			// Print auth setup hints (indented under Auth line)
+			if pathsAny, ok := report["paths"]; ok {
+				if pathsRep, ok := pathsAny.(map[string]any); ok {
+					renderPathsReport(w, pathsRep)
+				}
+			}
 			return doctorExitForFailOn(failOn, report)
 		},
 	}
-	cmd.Flags().StringVar(&failOn, "fail-on", "", "Exit non-zero when a health level is reached: stale, error. Default is never.")
+	cmd.Flags().StringVar(&failOn, "fail-on", "", "Exit non-zero for selected health gates. stale: cache freshness plus errors; warn: path warnings plus errors; error: errors only. Default is never.")
 	return cmd
 }
 
+func collectPathsReport() map[string]any {
+	report := map[string]any{}
+	resolutions, err := cliutil.AllPathResolutions()
+	if err != nil {
+		report["status"] = "error"
+		report["detail"] = err.Error()
+		return report
+	}
+	report["status"] = "ok"
+	ignoredSeen := map[string]bool{}
+	var ignored []map[string]string
+	var notes []string
+	for _, resolution := range resolutions {
+		report[resolution.KindName] = map[string]any{
+			"dir":    resolution.Dir,
+			"rung":   resolution.Rung,
+			"source": resolution.Source,
+		}
+		for _, skipped := range resolution.IgnoredOverrides {
+			key := skipped.Name + "\x00" + skipped.Value
+			if ignoredSeen[key] {
+				continue
+			}
+			ignoredSeen[key] = true
+			ignored = append(ignored, map[string]string{
+				"name":  skipped.Name,
+				"value": skipped.Value,
+			})
+		}
+		if cliutil.HomeOverrideActive() && resolution.Rung == "per-kind-env" && (resolution.Kind == cliutil.PathKindData || resolution.Kind == cliutil.PathKindConfig) {
+			notes = append(notes, fmt.Sprintf("--home shadowed for %s by %s", resolution.KindName, resolution.Source))
+		}
+	}
+	if len(ignored) > 0 {
+		report["skipped_relative_overrides"] = ignored
+	}
+	if len(notes) > 0 {
+		report["notes"] = notes
+	}
+	return report
+}
+
+func pathsWarning(report map[string]any) string {
+	if report == nil {
+		return ""
+	}
+	var parts []string
+	if raw, ok := report["skipped_relative_overrides"].([]map[string]string); ok && len(raw) > 0 {
+		names := make([]string, 0, len(raw))
+		for _, entry := range raw {
+			names = append(names, entry["name"])
+		}
+		parts = append(parts, "relative override skipped: "+strings.Join(names, ", "))
+	}
+	if raw, ok := report["notes"].([]string); ok && len(raw) > 0 {
+		parts = append(parts, "home override shadowed")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "WARN paths: " + strings.Join(parts, "; ")
+}
+
+func renderPathsReport(w io.Writer, rep map[string]any) {
+	if status, _ := rep["status"].(string); status == "error" {
+		fmt.Fprintf(w, "  %s Paths: %s\n", red("FAIL"), status)
+		if v, ok := rep["detail"]; ok {
+			fmt.Fprintf(w, "    detail: %v\n", v)
+		}
+		if v, ok := rep["error"]; ok {
+			fmt.Fprintf(w, "    error: %v\n", v)
+		}
+		return
+	}
+	fmt.Fprintf(w, "  Paths:\n")
+	for _, kind := range []string{"config", "data", "state", "cache"} {
+		entry, ok := rep[kind].(map[string]any)
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(w, "    %s: %v (%v)\n", kind, entry["dir"], entry["source"])
+	}
+	if raw, ok := rep["skipped_relative_overrides"].([]map[string]string); ok && len(raw) > 0 {
+		fmt.Fprintf(w, "    skipped_relative_overrides:\n")
+		for _, entry := range raw {
+			fmt.Fprintf(w, "      %s=%q\n", entry["name"], entry["value"])
+		}
+	}
+	if raw, ok := rep["notes"].([]string); ok && len(raw) > 0 {
+		fmt.Fprintf(w, "    notes:\n")
+		for _, note := range raw {
+			fmt.Fprintf(w, "      %s\n", note)
+		}
+	}
+}
+
+// doctorInfoKeys are report entries rendered as information, not health
+// checks. Their free text (hints, paths, tool names) can contain "missing"
+// or "error" without meaning the CLI is unhealthy.
+var doctorInfoKeys = map[string]bool{
+	"config_path":                  true,
+	"base_url":                     true,
+	"auth_source":                  true,
+	"auth_domain":                  true,
+	"auth_hint":                    true,
+	"auth_refusals":                true,
+	"version":                      true,
+	"cookie_tool":                  true,
+	"browser_session_proof_detail": true,
+	"credentials_location":         true,
+	"credentials_locations":        true,
+	"agentcookie":                  true,
+}
+
+func doctorIsInfoKey(key string) bool { return doctorInfoKeys[key] }
+
 // doctorExitForFailOn returns a non-nil error when the report's worst
-// status meets or exceeds the --fail-on threshold. "error" always trips
-// when any section reports an error; "stale" also trips when the cache
-// section is stale. The default empty string means never fail on status.
+// status meets the --fail-on gate. "error" trips on failing sections, "warn"
+// trips on deliberate WARN sections plus errors, and "stale" trips on cache
+// freshness plus errors. The default empty string means never fail on status.
+// The gate value is matched case-insensitively.
 func doctorExitForFailOn(failOn string, report map[string]any) error {
+	failOn = strings.ToLower(strings.TrimSpace(failOn))
 	if failOn == "" {
 		return nil
 	}
 	worstError := false
+	worstWarn := false
 	worstStale := false
-	for _, v := range report {
+	for k, v := range report {
 		s, ok := v.(string)
-		if ok {
-			if strings.Contains(s, "error") || strings.Contains(s, "unreachable") || strings.Contains(s, "invalid") || strings.Contains(s, "missing") {
+		if ok && !doctorIsInfoKey(k) {
+			low := strings.ToLower(s)
+			// A WARN prefix is the verdict. Explanatory text such as
+			// "neither accepted nor rejected" must not promote it to an error.
+			if strings.HasPrefix(low, "warn") {
+				worstWarn = true
+			} else if strings.HasPrefix(low, "error") || strings.HasPrefix(low, "refused:") || strings.HasPrefix(low, "rejected") || strings.Contains(low, "error") || strings.Contains(low, "unreachable") || strings.Contains(low, "invalid") || strings.Contains(low, "missing") {
 				worstError = true
 			}
 		}
 		if m, ok := v.(map[string]any); ok {
-			if st, _ := m["status"].(string); st == "error" {
+			st, _ := m["status"].(string)
+			switch strings.ToLower(st) {
+			case "error":
 				worstError = true
-			} else if st == "stale" {
+			case "warn":
+				worstWarn = true
+			case "stale":
 				worstStale = true
 			}
 		}
@@ -263,12 +535,16 @@ func doctorExitForFailOn(failOn string, report map[string]any) error {
 		if worstError {
 			return fmt.Errorf("doctor: --fail-on=error triggered")
 		}
+	case "warn":
+		if worstError || worstWarn {
+			return fmt.Errorf("doctor: --fail-on=warn triggered")
+		}
 	case "stale":
 		if worstError || worstStale {
 			return fmt.Errorf("doctor: --fail-on=stale triggered")
 		}
 	default:
-		return fmt.Errorf("doctor: unknown --fail-on value %q (valid: stale, error)", failOn)
+		return fmt.Errorf("doctor: unknown --fail-on value %q (valid: stale, warn, error)", failOn)
 	}
 	return nil
 }
