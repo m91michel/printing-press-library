@@ -98,7 +98,7 @@ Exit codes: 0 found, 3 notice not in the local store`,
 			dbPath = resolveTendersDB(dbPath)
 			if activeSource(flags) != sourceLive {
 				recordSource(flags, sourceLocal)
-				st, synced, err := openTendersIfSynced(cmd.Context(), dbPath)
+				st, synced, err := openTendersForRead(cmd.Context(), cmd.ErrOrStderr(), dbPath)
 				if err != nil {
 					return err
 				}
@@ -124,27 +124,42 @@ Exit codes: 0 found, 3 notice not in the local store`,
 				if len(resp.Notices) == 0 {
 					return notFoundErr(fmt.Errorf("TED has no notice %s", id))
 				}
-				tender := ted.Extract(resp.Notices[0])
+				tenderRaw := resp.Notices[0]
+				tender := ted.Extract(tenderRaw)
 				prefix := tender.CPVCode
 				if len(prefix) > cpvDigits {
 					prefix = prefix[:cpvDigits]
 				}
 				// The tender's country and CPV come from TED and are spliced
 				// into the next expert query, so they get the same shape check
-				// as user flags. A malformed value narrows the search to the
-				// tender itself, which yields zero incumbents.
-				q := ted.PublicationQuery(id)
+				// as user flags. A malformed value skips the prior-award
+				// search, which yields zero incumbents.
+				var st *store.Store
+				cleanup := func() {}
+				scanned := 0
 				if err := validateTEDFilters(tender.BuyerCountry, prefix); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "note: notice %s has an unusable buyer country or CPV (%q, %q); skipping the prior-award search\n", id, tender.BuyerCountry, prefix)
+					st, cleanup, err = openScratchStore(cmd)
+					if err != nil {
+						return err
+					}
 				} else {
-					q = ted.BuildQuery(ted.Filter{
-						Query: fmt.Sprintf("%s OR (buyer-name~%s AND notice-type=%s AND classification-cpv=%s)",
-							ted.PublicationQuery(id), tedQuoted(tender.BuyerName), ted.NoticeTypeAward, ted.NormalizeCPV(prefix)),
-						Country: tender.BuyerCountry,
+					q := ted.BuildQuery(ted.Filter{
+						Query:       "buyer-name~" + tedQuoted(tender.BuyerName),
+						Country:     tender.BuyerCountry,
+						CPV:         prefix,
+						NoticeTypes: []string{ted.NoticeTypeAward},
 					})
+					st, cleanup, scanned, err = liveScratchStore(cmd, flags, q, maxScan)
+					if err != nil {
+						return err
+					}
 				}
-				st, cleanup, scanned, err := liveScratchStore(cmd, flags, q, maxScan)
-				if err != nil {
+				// The tender comes from its own lookup above. Searching for it
+				// again inside the capped prior-award scan could drop it once
+				// the buyer has more awards than --max-scan.
+				if err := st.UpsertNotices(cmd.Context(), []ted.Notice{tender}, []map[string]any{tenderRaw}); err != nil {
+					cleanup()
 					return err
 				}
 				res, found, err = loadIncumbents(cmd.Context(), st, id, cpvDigits, limit)

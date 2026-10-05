@@ -554,7 +554,7 @@ func newNoticesGetCmd(flags *rootFlags) *cobra.Command {
 }
 
 func localNotice(cmd *cobra.Command, dbPath, id string) (ted.Notice, bool, error) {
-	st, ok, err := openTendersIfSynced(cmd.Context(), dbPath)
+	st, ok, err := openTendersForRead(cmd.Context(), cmd.ErrOrStderr(), dbPath)
 	if err != nil || !ok {
 		return ted.Notice{}, false, err
 	}

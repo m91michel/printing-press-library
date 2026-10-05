@@ -48,15 +48,37 @@ func OpenQueryOnly(ctx context.Context, dbPath string) (*Store, error) {
 // HasNoticesTable reports whether the TED tables exist. A database created
 // by another tool, or by an older binary before the first sync, lacks them.
 func (s *Store) HasNoticesTable(ctx context.Context) (bool, error) {
-	var name string
-	err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='notices'`).Scan(&name)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
+	state, err := s.NoticesSchema(ctx)
+	return state != NoticesSchemaMissing, err
+}
+
+// NoticesSchemaState classifies the notices table of a store.
+type NoticesSchemaState string
+
+const (
+	// NoticesSchemaMissing: no notices table (fresh file or foreign database).
+	NoticesSchemaMissing NoticesSchemaState = "missing"
+	// NoticesSchemaLegacy: a notices table written by an older binary. A
+	// writable open retires it; a query-only handle cannot.
+	NoticesSchemaLegacy NoticesSchemaState = "legacy"
+	// NoticesSchemaCurrent: the notices table this binary reads and writes.
+	NoticesSchemaCurrent NoticesSchemaState = "current"
+)
+
+// NoticesSchema reports whether the notices table is missing, legacy or
+// current. It only reads the schema, so it is safe on query-only handles.
+func (s *Store) NoticesSchema(ctx context.Context) (NoticesSchemaState, error) {
+	cols, exists, err := tableColumns(ctx, s.db, "notices")
 	if err != nil {
-		return false, err
+		return NoticesSchemaMissing, err
 	}
-	return true, nil
+	switch {
+	case !exists:
+		return NoticesSchemaMissing, nil
+	case !cols[currentNoticesMarkerColumn]:
+		return NoticesSchemaLegacy, nil
+	}
+	return NoticesSchemaCurrent, nil
 }
 
 // UpsertNotices writes notices and their winners in one transaction. Each
@@ -190,24 +212,40 @@ func (s *Store) SeenLeads(ctx context.Context, keys []LeadKey) (map[LeadKey]bool
 	return out, nil
 }
 
-// MarkLeadsSeen records companies so later --new-only runs skip them.
-func (s *Store) MarkLeadsSeen(ctx context.Context, keys []LeadKey) error {
+// ClaimLeads records companies for --new-only in one write transaction and
+// reports which of them this call claimed. A company already in lead_seen,
+// for example one claimed by a concurrent run since the caller's SeenLeads
+// pre-filter, maps to false, so two runs never both return it.
+func (s *Store) ClaimLeads(ctx context.Context, keys []LeadKey) (map[LeadKey]bool, error) {
+	out := make(map[LeadKey]bool, len(keys))
 	if len(keys) == 0 {
-		return nil
+		return out, nil
 	}
 	s.lockForWrite()
 	defer s.unlockAfterWrite()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, k := range keys {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO lead_seen(name_key, country, first_seen_at, last_seen_at) VALUES (?,?,?,?)
-			ON CONFLICT(name_key, country) DO UPDATE SET last_seen_at=excluded.last_seen_at`, k.NameKey, k.Country, now, now); err != nil {
-			return err
+		if _, done := out[k]; done {
+			continue
 		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO lead_seen(name_key, country, first_seen_at, last_seen_at) VALUES (?,?,?,?)
+			ON CONFLICT(name_key, country) DO NOTHING`, k.NameKey, k.Country, now, now)
+		if err != nil {
+			return nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		out[k] = n == 1
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

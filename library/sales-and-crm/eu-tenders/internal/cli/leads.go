@@ -34,7 +34,8 @@ title, project location, contract value and the TED link. TED lists contacts
 in organisation-name-tenderer order, which differs from the per-lot winner
 list; this command matches them by company so each row carries the right
 contact data. Values are the company's own lot values when TED reports them,
-otherwise the notice total.
+otherwise the notice total when the company is the notice's only winner,
+else 0.
 
 Reads the local store when it holds award notices (run sync first), otherwise
 queries TED live (--data-source live forces the API).
@@ -54,7 +55,9 @@ CPV codes by project type:
 
 --group-by company folds rows into one per company with win count and total
 value. --new-only skips companies returned by earlier --new-only runs and
-records the ones it returns, for a weekly "only new leads" digest.`,
+records the ones it returns, for a weekly "only new leads" digest. Each
+company is claimed atomically, so concurrent --new-only runs on one store
+never return the same company twice.`,
 		Example: strings.Trim(`
   eu-tenders-pp-cli leads --country DEU --days 7 --json
   eu-tenders-pp-cli leads --country DEU --cpv 45310000 --days 30 --json
@@ -116,9 +119,18 @@ records the ones it returns, for a weekly "only new leads" digest.`,
 					for _, c := range grouped {
 						keys = append(keys, leadStoreKey(c.WinnerName, c.WinnerCountry))
 					}
-					if err := markLeadsSeen(cmd, resolveTendersDB(dbPath), keys); err != nil {
+					claimed, err := claimLeads(cmd, resolveTendersDB(dbPath), keys)
+					if err != nil {
 						return err
 					}
+					kept := grouped[:0]
+					for i, c := range grouped {
+						if claimed[keys[i]] {
+							kept = append(kept, c)
+						}
+					}
+					noteConcurrentClaims(cmd, len(grouped)-len(kept))
+					grouped = kept
 				}
 				if !wantsHumanTable(cmd.OutOrStdout(), flags) {
 					return printJSONFiltered(cmd.OutOrStdout(), grouped, flags)
@@ -142,9 +154,21 @@ records the ones it returns, for a weekly "only new leads" digest.`,
 				for _, l := range leads {
 					keys = append(keys, leadStoreKey(l.WinnerName, l.WinnerCountry))
 				}
-				if err := markLeadsSeen(cmd, resolveTendersDB(dbPath), keys); err != nil {
+				claimed, err := claimLeads(cmd, resolveTendersDB(dbPath), keys)
+				if err != nil {
 					return err
 				}
+				kept := leads[:0]
+				lost := map[store.LeadKey]bool{}
+				for i, l := range leads {
+					if claimed[keys[i]] {
+						kept = append(kept, l)
+					} else {
+						lost[keys[i]] = true
+					}
+				}
+				noteConcurrentClaims(cmd, len(lost))
+				leads = kept
 			}
 			if !wantsHumanTable(cmd.OutOrStdout(), flags) {
 				return printJSONFiltered(cmd.OutOrStdout(), leads, flags)
@@ -206,24 +230,27 @@ func dropSeenLeads(cmd *cobra.Command, dbPath string, leads []leadRow) ([]leadRo
 	return out, skipped, nil
 }
 
-// markLeadsSeen records only the companies this run actually returned, so a
-// --limit cut never hides leads from later --new-only runs.
-func markLeadsSeen(cmd *cobra.Command, dbPath string, keys []store.LeadKey) error {
-	uniq := make([]store.LeadKey, 0, len(keys))
-	dup := map[store.LeadKey]bool{}
-	for _, k := range keys {
-		if !dup[k] {
-			dup[k] = true
-			uniq = append(uniq, k)
-		}
-	}
+// claimLeads records the companies this run is about to return and reports
+// which ones it claimed. Only the rows that survived --limit are claimed, so
+// a --limit cut never hides leads from later --new-only runs. The claim is
+// one write transaction with insert-if-absent per company: when another
+// --new-only run claimed a company after this run's SeenLeads pre-filter,
+// the company maps to false and this run drops it.
+func claimLeads(cmd *cobra.Command, dbPath string, keys []store.LeadKey) (map[store.LeadKey]bool, error) {
 	st, err := store.OpenWithContext(cmd.Context(), dbPath)
 	if err != nil {
-		return fmt.Errorf("opening local store for --new-only: %w", err)
+		return nil, fmt.Errorf("opening local store for --new-only: %w", err)
 	}
 	defer st.Close()
-	if err := st.MarkLeadsSeen(cmd.Context(), uniq); err != nil {
-		return fmt.Errorf("recording lead seen-state: %w", err)
+	claimed, err := st.ClaimLeads(cmd.Context(), keys)
+	if err != nil {
+		return nil, fmt.Errorf("recording lead seen-state: %w", err)
 	}
-	return nil
+	return claimed, nil
+}
+
+func noteConcurrentClaims(cmd *cobra.Command, n int) {
+	if n > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "dropped %d companies another --new-only run returned first\n", n)
+	}
 }

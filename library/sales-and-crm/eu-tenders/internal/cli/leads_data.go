@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -27,7 +28,11 @@ type awardWinnerRow struct {
 	NoticeValue     float64
 	Currency        string
 	NoticeURL       string
-	Winner          ted.Winner
+	// WinnerCount is the number of winners on the notice. The notice total
+	// stands in for a missing winner value only when it is 1; otherwise each
+	// winner would claim the whole notice.
+	WinnerCount int
+	Winner      ted.Winner
 }
 
 type awardQuery struct {
@@ -41,8 +46,10 @@ type awardQuery struct {
 }
 
 // loadAwardWinners returns award-winner rows from the local store or, when the
-// store has no awards (auto) or --data-source live is set, from the TED API.
-// The returned source is local or live; scanned counts live notices read.
+// store has no awards or none matching q (auto) or --data-source live is set,
+// from the TED API. A store synced for other filters must not hide TED
+// matches in auto mode. The returned source is local or live; scanned counts
+// live notices read.
 func loadAwardWinners(cmd *cobra.Command, flags *rootFlags, q awardQuery) ([]awardWinnerRow, dataSource, int, error) {
 	if err := validateTEDFilters(q.Country, q.CPV); err != nil {
 		return nil, "", 0, err
@@ -50,16 +57,19 @@ func loadAwardWinners(cmd *cobra.Command, flags *rootFlags, q awardQuery) ([]awa
 	ctx, cancel := boundCtx(cmd.Context(), flags)
 	defer cancel()
 	if activeSource(flags) != sourceLive {
-		rows, ok, err := localAwardWinners(ctx, q)
+		rows, ok, err := localAwardWinners(ctx, cmd.ErrOrStderr(), q)
 		if err != nil {
 			return nil, "", 0, err
 		}
-		if ok || activeSource(flags) == sourceLocal {
+		if (ok && len(rows) > 0) || activeSource(flags) == sourceLocal {
 			if !ok {
 				fmt.Fprintf(cmd.ErrOrStderr(), "hint: the local store has no award notices; run %s sync --since 90d --param country=DEU --param cpv=45\n", tendersCLIName)
 			}
 			recordSource(flags, sourceLocal)
 			return rows, sourceLocal, 0, nil
+		}
+		if ok && !flags.quiet {
+			fmt.Fprintln(cmd.ErrOrStderr(), "no local matches; querying TED live")
 		}
 	}
 	recordSource(flags, sourceLive)
@@ -87,15 +97,18 @@ func loadAwardWinners(cmd *cobra.Command, flags *rootFlags, q awardQuery) ([]awa
 				NoticeID: n.ID, PublishedDate: n.PublicationDate, Title: n.Title, CPVCode: n.CPVCode,
 				BuyerName: n.BuyerName, BuyerCountry: n.BuyerCountry, BuyerCity: n.BuyerCity,
 				PlaceNUTS: n.PlaceOfPerformance, PerformanceCity: n.PerformanceCity,
-				NoticeValue: n.ContractValue, Currency: n.Currency, NoticeURL: n.NoticeURL, Winner: w,
+				NoticeValue: n.ContractValue, Currency: n.Currency, NoticeURL: n.NoticeURL,
+				WinnerCount: len(n.Winners), Winner: w,
 			})
 		}
 	}
 	return out, sourceLive, len(raws), nil
 }
 
-func localAwardWinners(ctx context.Context, q awardQuery) ([]awardWinnerRow, bool, error) {
-	st, synced, err := openTendersIfSynced(ctx, resolveTendersDB(q.DBPath))
+// localAwardWinners reads matching award winners from the store. ok reports
+// that the store holds award notices at all, whether or not any match q.
+func localAwardWinners(ctx context.Context, stderr io.Writer, q awardQuery) ([]awardWinnerRow, bool, error) {
+	st, synced, err := openTendersForRead(ctx, stderr, resolveTendersDB(q.DBPath))
 	if err != nil || !synced {
 		return []awardWinnerRow{}, false, err
 	}
@@ -116,7 +129,7 @@ func localAwardWinners(ctx context.Context, q awardQuery) ([]awardWinnerRow, boo
 	}
 	rows, err := st.DB().QueryContext(ctx, `SELECT n.id, n.publication_date, n.title, n.cpv_code, n.buyer_name,
 		n.buyer_country, n.buyer_city, n.place_of_performance, n.performance_city, n.contract_value, n.currency, n.notice_url,
-		w.name, w.country, w.city, w.post_code, w.nuts, w.email, w.phone, w.identifier, w.size, w.lots_won, w.value
+		n.winner_count, w.name, w.country, w.city, w.post_code, w.nuts, w.email, w.phone, w.identifier, w.size, w.lots_won, w.value
 		FROM notice_winners w JOIN notices n ON n.id = w.notice_id`+f.where()+`
 		ORDER BY n.publication_date DESC, n.id`, f.args...)
 	if err != nil {
@@ -128,7 +141,7 @@ func localAwardWinners(ctx context.Context, q awardQuery) ([]awardWinnerRow, boo
 		w := &r.Winner
 		if err := rows.Scan(&r.NoticeID, &r.PublishedDate, &r.Title, &r.CPVCode, &r.BuyerName, &r.BuyerCountry,
 			&r.BuyerCity, &r.PlaceNUTS, &r.PerformanceCity, &r.NoticeValue, &r.Currency, &r.NoticeURL,
-			&w.Name, &w.Country, &w.City, &w.PostCode, &w.NUTS, &w.Email, &w.Phone, &w.Identifier, &w.Size, &w.LotsWon, &w.Value); err != nil {
+			&r.WinnerCount, &w.Name, &w.Country, &w.City, &w.PostCode, &w.NUTS, &w.Email, &w.Phone, &w.Identifier, &w.Size, &w.LotsWon, &w.Value); err != nil {
 			_ = rows.Close()
 			return nil, false, err
 		}
@@ -187,7 +200,7 @@ type companyLead struct {
 
 func toLeadRow(r awardWinnerRow) leadRow {
 	value := r.Winner.Value
-	if value == 0 {
+	if value == 0 && r.WinnerCount == 1 {
 		value = r.NoticeValue
 	}
 	loc := strings.TrimSpace(strings.Join(nonEmpty(r.PerformanceCity, r.PlaceNUTS), " "))

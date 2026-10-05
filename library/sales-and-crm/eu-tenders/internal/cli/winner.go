@@ -107,7 +107,7 @@ Reads the local store first; when it has no matching awards (or with
 			dbPath = resolveTendersDB(dbPath)
 			if activeSource(flags) != sourceLive {
 				recordSource(flags, sourceLocal)
-				st, synced, err := openTendersIfSynced(cmd.Context(), dbPath)
+				st, synced, err := openTendersForRead(cmd.Context(), cmd.ErrOrStderr(), dbPath)
 				if err != nil {
 					return err
 				}

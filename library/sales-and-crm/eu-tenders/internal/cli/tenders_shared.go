@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -182,7 +183,7 @@ func resolveTendersDB(dbPath string) string {
 // and an empty result, and stop is true. Otherwise st is open and the caller
 // must close it.
 func openLocalMirror(cmd *cobra.Command, flags *rootFlags, dbPath string, empty any) (st *store.Store, stop bool, err error) {
-	st, ok, err := openTendersIfSynced(cmd.Context(), dbPath)
+	st, ok, err := openTendersForRead(cmd.Context(), cmd.ErrOrStderr(), dbPath)
 	if err != nil {
 		return nil, true, err
 	}
@@ -209,8 +210,23 @@ func openTendersRead(ctx context.Context, dbPath string) (*store.Store, error) {
 
 // openTendersIfSynced opens the store query-only when the file and its TED
 // tables exist. ok is false otherwise, and callers treat that as an empty
-// store.
+// store. It prints no hints, for callers that read the store only as
+// optional context.
 func openTendersIfSynced(ctx context.Context, dbPath string) (st *store.Store, ok bool, err error) {
+	return openTendersForRead(ctx, io.Discard, dbPath)
+}
+
+// openTendersForRead is openTendersIfSynced with hints on stderr. A store
+// whose notices table predates the current schema counts as not synced: a
+// query-only handle cannot migrate it, and its columns would fail every
+// query. When the default store holds no notices and the previous version's
+// store file exists, it also points at that file.
+func openTendersForRead(ctx context.Context, stderr io.Writer, dbPath string) (st *store.Store, ok bool, err error) {
+	defer func() {
+		if err == nil {
+			hintLegacyDefaultStore(ctx, stderr, dbPath, st, ok)
+		}
+	}()
 	exists, err := fileExists(dbPath)
 	if err != nil || !exists {
 		return nil, false, err
@@ -219,12 +235,52 @@ func openTendersIfSynced(ctx context.Context, dbPath string) (st *store.Store, o
 	if err != nil {
 		return nil, false, err
 	}
-	has, err := st.HasNoticesTable(ctx)
-	if err != nil || !has {
+	state, err := st.NoticesSchema(ctx)
+	if err != nil || state != store.NoticesSchemaCurrent {
 		_ = st.Close()
+		if err == nil && state == store.NoticesSchemaLegacy {
+			fmt.Fprintf(stderr, "hint: this store was created by an older version; run sync to rebuild it: %s sync --since 90d --param country=DEU --param cpv=45 --db %s\n(sync keeps the old rows in table %s)\n",
+				tendersCLIName, dbPath, store.LegacyNoticesTable)
+		}
 		return nil, false, err
 	}
 	return st, true, nil
+}
+
+// legacyDefaultStorePath is where the previous major version of this CLI
+// kept its store. "" when the home directory is unknown.
+func legacyDefaultStorePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", tendersCLIName, "notices.db")
+}
+
+// hintLegacyDefaultStore tells users upgrading from the previous version why
+// the default store looks empty. That version wrote a differently shaped
+// store at another path and never recorded winner contacts, so its data
+// cannot be carried over. The old file is only reported, never touched.
+func hintLegacyDefaultStore(ctx context.Context, stderr io.Writer, dbPath string, st *store.Store, ok bool) {
+	if stderr == io.Discard || dbPath != defaultDBPath(tendersCLIName) {
+		return
+	}
+	if ok && st != nil {
+		if n, err := st.NoticeCount(ctx, ""); err != nil || n > 0 {
+			return
+		}
+	}
+	legacy := legacyDefaultStorePath()
+	if legacy == "" || filepath.Clean(legacy) == filepath.Clean(dbPath) {
+		return
+	}
+	if found, err := fileExists(legacy); err != nil || !found {
+		return
+	}
+	fmt.Fprintf(stderr, "hint: found a store from an older version of %s at %s.\n"+
+		"The store format changed and winner contacts require a fresh sync: %s sync --since 90d --param country=DEU --param cpv=45\n"+
+		"Reusing the old file with --db %s is not supported; the file is left unchanged.\n",
+		tendersCLIName, legacy, tendersCLIName, legacy)
 }
 
 // hintIfNoNotices writes a stderr hint when the store has no synced notices.
@@ -383,14 +439,8 @@ func liveScratchStore(cmd *cobra.Command, flags *rootFlags, query string, maxSca
 	if err != nil {
 		return nil, func() {}, 0, err
 	}
-	dir, err := os.MkdirTemp("", "eu-tenders-live-")
+	st, cleanup, err := openScratchStore(cmd)
 	if err != nil {
-		return nil, func() {}, 0, err
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	st, err := store.OpenWithContext(cmd.Context(), filepath.Join(dir, "live-scratch"))
-	if err != nil {
-		cleanup()
 		return nil, func() {}, 0, err
 	}
 	notices := make([]ted.Notice, 0, len(raws))
@@ -398,11 +448,25 @@ func liveScratchStore(cmd *cobra.Command, flags *rootFlags, query string, maxSca
 		notices = append(notices, ted.Extract(raw))
 	}
 	if err := st.UpsertNotices(cmd.Context(), notices, raws); err != nil {
-		_ = st.Close()
 		cleanup()
 		return nil, func() {}, 0, err
 	}
-	return st, func() { _ = st.Close(); cleanup() }, len(raws), nil
+	return st, cleanup, len(raws), nil
+}
+
+// openScratchStore creates an empty writable store in a temporary directory.
+// cleanup closes the store and removes the directory.
+func openScratchStore(cmd *cobra.Command) (*store.Store, func(), error) {
+	dir, err := os.MkdirTemp("", "eu-tenders-live-")
+	if err != nil {
+		return nil, func() {}, err
+	}
+	st, err := store.OpenWithContext(cmd.Context(), filepath.Join(dir, "live-scratch"))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, func() {}, err
+	}
+	return st, func() { _ = st.Close(); _ = os.RemoveAll(dir) }, nil
 }
 
 // tedQuoted renders a value for a TED text clause such as winner-name~"...".

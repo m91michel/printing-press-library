@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/store"
 	"github.com/mvanhorn/printing-press-library/library/sales-and-crm/eu-tenders/internal/ted"
 )
 
@@ -28,6 +30,7 @@ type awardRow struct {
 	WinnerCountry string  `json:"winner_country"`
 	WinnerValue   float64 `json:"winner_value"`
 	NoticeValue   float64 `json:"notice_value"`
+	WinnerCount   int     `json:"winner_count"`
 	Currency      string  `json:"currency"`
 	BuyerName     string  `json:"buyer_name"`
 	BuyerCountry  string  `json:"buyer_country"`
@@ -87,7 +90,7 @@ For outreach rows with contact data use 'leads' instead.`,
 			for _, r := range rows {
 				out = append(out, awardRow{
 					NoticeID: r.NoticeID, PublishedDate: r.PublishedDate, WinnerName: r.Winner.Name,
-					WinnerCountry: r.Winner.Country, WinnerValue: round2(r.Winner.Value), NoticeValue: round2(r.NoticeValue),
+					WinnerCountry: r.Winner.Country, WinnerValue: round2(r.Winner.Value), NoticeValue: round2(r.NoticeValue), WinnerCount: r.WinnerCount,
 					Currency: r.Currency, BuyerName: r.BuyerName, BuyerCountry: r.BuyerCountry,
 					CPVCode: r.CPVCode, Title: r.Title, TEDURL: r.NoticeURL,
 				})
@@ -105,8 +108,9 @@ For outreach rows with contact data use 'leads' instead.`,
 			tw := newTabWriter(cmd.OutOrStdout())
 			fmt.Fprintln(tw, "DATE\tWINNER\tVALUE\tBUYER\tTITLE")
 			for _, a := range out {
+				// The notice total is this winner's value only when it won alone.
 				v := a.WinnerValue
-				if v == 0 {
+				if v == 0 && a.WinnerCount == 1 {
 					v = a.NoticeValue
 				}
 				fmt.Fprintf(tw, "%s\t%s\t%.0f\t%s\t%s\n", a.PublishedDate, truncate(a.WinnerName, 36), v, truncate(a.BuyerName, 36), truncate(a.Title, 50))
@@ -141,6 +145,8 @@ type deadlineRow struct {
 }
 
 // loadOpenCalls returns calls for tender whose deadline falls in [today, today+days].
+// Auto mode reads the store when it holds calls matching the filters and
+// queries TED otherwise.
 func loadOpenCalls(cmd *cobra.Command, flags *rootFlags, country, cpv string, days int, dbPath string, maxScan int) ([]ted.Notice, error) {
 	if err := validateTEDFilters(country, cpv); err != nil {
 		return nil, err
@@ -150,55 +156,36 @@ func loadOpenCalls(cmd *cobra.Command, flags *rootFlags, country, cpv string, da
 	today := time.Now().UTC().Format("2006-01-02")
 	end := time.Now().UTC().AddDate(0, 0, days).Format("2006-01-02")
 	if activeSource(flags) != sourceLive {
-		st, synced, err := openTendersIfSynced(ctx, resolveTendersDB(dbPath))
+		localOnly := activeSource(flags) == sourceLocal
+		st, synced, err := openTendersForRead(ctx, cmd.ErrOrStderr(), resolveTendersDB(dbPath))
 		if err != nil {
 			return nil, err
 		}
-		if !synced && activeSource(flags) == sourceLocal {
-			recordSource(flags, sourceLocal)
-			fmt.Fprintf(cmd.ErrOrStderr(), "hint: the local store has no calls for tender; run %s sync --type call\n", tendersCLIName)
-			return []ted.Notice{}, nil
-		}
+		n := 0
 		if synced {
 			defer st.Close()
-			n, err := st.NoticeCount(ctx, ted.NoticeTypeCall)
+			if n, err = st.NoticeCount(ctx, ted.NoticeTypeCall); err != nil {
+				return nil, err
+			}
+		}
+		if n > 0 {
+			out, err := localOpenCalls(ctx, st, country, cpv, today, end)
 			if err != nil {
 				return nil, err
 			}
-			if n > 0 || activeSource(flags) == sourceLocal {
+			// A store synced for other filters must not hide TED matches
+			// in auto mode.
+			if len(out) > 0 || localOnly {
 				recordSource(flags, sourceLocal)
-				f := &noticeFilterSQL{}
-				f.add("notice_type = ?", ted.NoticeTypeCall)
-				f.add("submission_deadline >= ?", today)
-				f.add("submission_deadline <= ?", end)
-				f.country("buyer_country", country)
-				f.cpv("cpv_code", cpv)
-				rows, err := st.DB().QueryContext(ctx, `SELECT id, publication_date, title, buyer_name, buyer_country,
-					estimated_value, currency, cpv_code, procedure_type, submission_deadline,
-					place_of_performance, performance_city, notice_url FROM notices`+f.where()+` ORDER BY submission_deadline`, f.args...)
-				if err != nil {
-					return nil, fmt.Errorf("querying open calls: %w", err)
-				}
-				out := make([]ted.Notice, 0)
-				for rows.Next() {
-					var c ted.Notice
-					if err := rows.Scan(&c.ID, &c.PublicationDate, &c.Title, &c.BuyerName, &c.BuyerCountry, &c.EstimatedValue,
-						&c.Currency, &c.CPVCode, &c.ProcedureType, &c.SubmissionDeadline, &c.PlaceOfPerformance, &c.PerformanceCity, &c.NoticeURL); err != nil {
-						_ = rows.Close()
-						return nil, err
-					}
-					c.NoticeType = ted.NoticeTypeCall
-					out = append(out, c)
-				}
-				if err := rows.Err(); err != nil {
-					_ = rows.Close()
-					return nil, err
-				}
-				if n == 0 {
-					fmt.Fprintf(cmd.ErrOrStderr(), "hint: the local store has no calls for tender; run %s sync --type call\n", tendersCLIName)
-				}
-				return out, rows.Close()
+				return out, nil
 			}
+			if !flags.quiet {
+				fmt.Fprintln(cmd.ErrOrStderr(), "no local matches; querying TED live")
+			}
+		} else if localOnly {
+			recordSource(flags, sourceLocal)
+			fmt.Fprintf(cmd.ErrOrStderr(), "hint: the local store has no calls for tender; run %s sync --type call\n", tendersCLIName)
+			return []ted.Notice{}, nil
 		}
 	}
 	recordSource(flags, sourceLive)
@@ -222,6 +209,38 @@ func loadOpenCalls(cmd *cobra.Command, flags *rootFlags, country, cpv string, da
 	}
 	sort.SliceStable(out, func(a, b int) bool { return out[a].SubmissionDeadline < out[b].SubmissionDeadline })
 	return out, nil
+}
+
+// localOpenCalls reads stored calls for tender whose deadline is in [today, end].
+func localOpenCalls(ctx context.Context, st *store.Store, country, cpv, today, end string) ([]ted.Notice, error) {
+	f := &noticeFilterSQL{}
+	f.add("notice_type = ?", ted.NoticeTypeCall)
+	f.add("submission_deadline >= ?", today)
+	f.add("submission_deadline <= ?", end)
+	f.country("buyer_country", country)
+	f.cpv("cpv_code", cpv)
+	rows, err := st.DB().QueryContext(ctx, `SELECT id, publication_date, title, buyer_name, buyer_country,
+		estimated_value, currency, cpv_code, procedure_type, submission_deadline,
+		place_of_performance, performance_city, notice_url FROM notices`+f.where()+` ORDER BY submission_deadline`, f.args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying open calls: %w", err)
+	}
+	out := make([]ted.Notice, 0)
+	for rows.Next() {
+		var c ted.Notice
+		if err := rows.Scan(&c.ID, &c.PublicationDate, &c.Title, &c.BuyerName, &c.BuyerCountry, &c.EstimatedValue,
+			&c.Currency, &c.CPVCode, &c.ProcedureType, &c.SubmissionDeadline, &c.PlaceOfPerformance, &c.PerformanceCity, &c.NoticeURL); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		c.NoticeType = ted.NoticeTypeCall
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return out, rows.Close()
 }
 
 // daysUntil counts whole days from today to a YYYY-MM-DD date.
