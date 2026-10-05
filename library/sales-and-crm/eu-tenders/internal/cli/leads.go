@@ -111,14 +111,14 @@ never return the same company twice.`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %d leads already returned by earlier --new-only runs\n", skipped)
 			}
 
-			// release gives back --new-only claims when no lead reached the
-			// output, so a failed digest does not hide them from later runs.
-			// Once any byte was written (e.g. a --select miss reported after
-			// printing), the leads count as delivered and stay claimed.
+			// release gives back --new-only claims when the leads did not reach
+			// the output intact: nothing was written, or a write failed (full
+			// disk, broken pipe). An error raised after a complete write, such
+			// as a --select miss, keeps the delivered leads claimed.
 			release := func() {}
 			out := &countingWriter{w: cmd.OutOrStdout()}
 			deliver := func(err error) error {
-				if err != nil && out.n == 0 {
+				if err != nil && (out.n == 0 || out.err != nil) {
 					release()
 				}
 				return err
@@ -223,15 +223,20 @@ func dropSeenLeads(cmd *cobra.Command, dbPath string, leads []leadRow) ([]leadRo
 	return out, skipped, nil
 }
 
-// countingWriter records how many bytes reached the output.
+// countingWriter records how many bytes reached the output and the first
+// write error.
 type countingWriter struct {
-	w io.Writer
-	n int
+	w   io.Writer
+	n   int
+	err error
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.n += n
+	if err != nil && c.err == nil {
+		c.err = err
+	}
 	return n, err
 }
 

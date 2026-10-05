@@ -517,3 +517,36 @@ func TestNewOnlyKeepsClaimsWhenLeadsWerePrinted(t *testing.T) {
 		t.Fatalf("printed leads must stay claimed after a --select error, got %+v", again)
 	}
 }
+
+// failAfterWriter accepts limit bytes, then fails like a closed pipe.
+type failAfterWriter struct{ limit, n int }
+
+func (f *failAfterWriter) Write(p []byte) (int, error) {
+	if f.n+len(p) > f.limit {
+		k := f.limit - f.n
+		f.n = f.limit
+		return k, io.ErrClosedPipe
+	}
+	f.n += len(p)
+	return len(p), nil
+}
+
+func TestNewOnlyReleasesClaimsWhenOutputBreaks(t *testing.T) {
+	db := seedTendersDB(t, []ted.Notice{
+		awardNotice("1-2026", daysFromToday(-1), "Stadt A", "DEU", "45210000", 1, ted.Winner{Name: "A GmbH", Country: "DEU", LotsWon: 1}),
+	})
+	testenv.Isolate(t)
+	cmd := RootCmd()
+	var stderr bytes.Buffer
+	cmd.SetOut(&failAfterWriter{limit: 10})
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"leads", "--country", "DEU", "--days", "30", "--new-only", "--json", "--db", db, "--data-source", "local"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("want the broken-pipe write error")
+	}
+	var again []leadRow
+	runTendersJSON(t, &again, "leads", "--country", "DEU", "--days", "30", "--new-only", "--db", db, "--data-source", "local")
+	if len(again) != 1 {
+		t.Fatalf("a partially written digest must give its leads back, got %+v", again)
+	}
+}

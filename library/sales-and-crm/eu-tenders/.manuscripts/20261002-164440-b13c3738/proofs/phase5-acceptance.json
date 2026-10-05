@@ -11,7 +11,7 @@
   "auth_context": {
     "type": "none"
   },
-  "source_fingerprint": "fbcd56a54e1bc733e988a393181b892cfff33bff700534155996a54ee8a91ebf",
+  "source_fingerprint": "5d86b6442e5ad81bbf4f51d1917a4cb1fc9478ab219cc677f584a86a2289dda7",
   "source_files": {
     "cmd/eu-tenders-pp-cli/main.go": "f2bbbdfc759139076f90ddba3a41c6d89dde9388ee0a6eb6b84bb3ac3cb462ce",
     "cmd/eu-tenders-pp-mcp/http_auth_test.go": "4dab0dd883d875aee961c4b9edb667f14dce0673a9bffb2407c0afd1609ff432",
@@ -41,7 +41,7 @@
     "internal/cli/import.go": "3c82ce7da6e313ea1f90ad5c83afc71849bc9931904bb0b6bd602a1f0de27998",
     "internal/cli/incumbents.go": "3cf2bb38461e4c5c9fb25a74fe83bf2e43c84d33658f3f499f6c0d29e8ca3b23",
     "internal/cli/incumbents_test.go": "689dd6fba4928f9adc1561f104da2e980337195dc684f5087d0feb9e463bef36",
-    "internal/cli/leads.go": "c334378830e31eaaf27af4a90382d87fccd0a577ef74ea869eeb52adb93357af",
+    "internal/cli/leads.go": "d077fd72b937fb3d6c8273f9d96f34f4bb99da11d0ab3d7a4645a4a380b9af19",
     "internal/cli/leads_data.go": "c62797fc85d17bbf328a986ed3ac6ef91c550aecddd136d06e6601a8437a8bd8",
     "internal/cli/leads_test.go": "d2beed26dbebcc9403af1376e21e8a8da337afa107bd537e71d6d771a79dee92",
     "internal/cli/learn_init.go": "14da4206f3260f56a670c1b28d70487fc373751b11a548fe543cac512ca8ddeb",
@@ -62,7 +62,7 @@
     "internal/cli/ranking.go": "fb830b669d9b81def9bfe8a385d0949092bb9d6970f94d9628a721a871f200c8",
     "internal/cli/ranking_test.go": "aee0c17fa46a11440eab8f4920f456259b2ce29aa7182f99ecffd967e3d14998",
     "internal/cli/resource_paths.go": "bac389afc2b3e571e872e039faae6e72d53ae5a23b74f907a8462289538cb5e8",
-    "internal/cli/review_fixes_test.go": "2cf5dd0ac5ba2be6460e247f60f927ab24600f489a332f166a51dd5a34e61f44",
+    "internal/cli/review_fixes_test.go": "89ac610d65f8141e7b1d1c4429043bd63145e255ae3c2376210588519e35f565",
     "internal/cli/root.go": "b75ebf90048e429d6591af3b7979d5e5065f96a15e819db5f4afa17c2874b855",
     "internal/cli/root_test.go": "aa44fa972ae6a711f667485d96bc11c7085f51e45b9b4859f07e48305cadd075",
     "internal/cli/score.go": "e79b0e0d13ff6e3374510d83a00a8e1f20c3facd36230e9235ce240895d8d6b2",
