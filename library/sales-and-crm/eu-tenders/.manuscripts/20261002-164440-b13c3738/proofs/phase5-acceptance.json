@@ -11,7 +11,7 @@
   "auth_context": {
     "type": "none"
   },
-  "source_fingerprint": "5d86b6442e5ad81bbf4f51d1917a4cb1fc9478ab219cc677f584a86a2289dda7",
+  "source_fingerprint": "a42e38964bbe6c0c46b37631feeb50dd1c9b25bc23499e6c0aee123a9dcdc9c8",
   "source_files": {
     "cmd/eu-tenders-pp-cli/main.go": "f2bbbdfc759139076f90ddba3a41c6d89dde9388ee0a6eb6b84bb3ac3cb462ce",
     "cmd/eu-tenders-pp-mcp/http_auth_test.go": "4dab0dd883d875aee961c4b9edb667f14dce0673a9bffb2407c0afd1609ff432",
@@ -41,7 +41,7 @@
     "internal/cli/import.go": "3c82ce7da6e313ea1f90ad5c83afc71849bc9931904bb0b6bd602a1f0de27998",
     "internal/cli/incumbents.go": "3cf2bb38461e4c5c9fb25a74fe83bf2e43c84d33658f3f499f6c0d29e8ca3b23",
     "internal/cli/incumbents_test.go": "689dd6fba4928f9adc1561f104da2e980337195dc684f5087d0feb9e463bef36",
-    "internal/cli/leads.go": "d077fd72b937fb3d6c8273f9d96f34f4bb99da11d0ab3d7a4645a4a380b9af19",
+    "internal/cli/leads.go": "e87b7852dfd6ce4f05fbaf063c4938240aee3ac37864bddc12ca2e341f4dadd2",
     "internal/cli/leads_data.go": "c62797fc85d17bbf328a986ed3ac6ef91c550aecddd136d06e6601a8437a8bd8",
     "internal/cli/leads_test.go": "d2beed26dbebcc9403af1376e21e8a8da337afa107bd537e71d6d771a79dee92",
     "internal/cli/learn_init.go": "14da4206f3260f56a670c1b28d70487fc373751b11a548fe543cac512ca8ddeb",

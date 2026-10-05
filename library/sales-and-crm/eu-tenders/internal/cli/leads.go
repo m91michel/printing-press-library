@@ -59,7 +59,10 @@ CPV codes by project type:
 value. --new-only skips companies returned by earlier --new-only runs and
 records the ones it returns, for a weekly "only new leads" digest. Each
 company is claimed atomically, so concurrent --new-only runs on one store
-never return the same company twice.`,
+never return the same company twice. Delivery is at least once: when the
+output fails (nothing written, full disk, broken pipe), the run gives its
+companies back, so the next digest returns them again and a lead is never
+lost; rows that reached the reader before the failure may repeat.`,
 		Example: strings.Trim(`
   eu-tenders-pp-cli leads --country DEU --days 7 --json
   eu-tenders-pp-cli leads --country DEU --cpv 45310000 --days 30 --json
@@ -111,10 +114,12 @@ never return the same company twice.`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %d leads already returned by earlier --new-only runs\n", skipped)
 			}
 
-			// release gives back --new-only claims when the leads did not reach
-			// the output intact: nothing was written, or a write failed (full
-			// disk, broken pipe). An error raised after a complete write, such
-			// as a --select miss, keeps the delivered leads claimed.
+			// --new-only delivers at least once. release gives the claims back
+			// when the leads did not reach the output intact: nothing was
+			// written, or a write failed (full disk, broken pipe). The table
+			// writer buffers rows, so a failed write cannot tell which rows
+			// arrived; repeating a few rows beats losing leads. An error raised
+			// after a complete write, such as a --select miss, keeps the claims.
 			release := func() {}
 			out := &countingWriter{w: cmd.OutOrStdout()}
 			deliver := func(err error) error {
