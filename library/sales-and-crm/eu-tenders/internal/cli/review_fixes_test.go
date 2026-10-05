@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -415,5 +416,42 @@ func TestNewOnlyNeverReturnsACompanyTwice(t *testing.T) {
 	}
 	if len(got)+len(seen) != 6 {
 		t.Errorf("companies returned overall: %d earlier + %d concurrent, want 6", len(seen), len(got))
+	}
+}
+
+func TestClaimUpToRefillsSlotsLostToConcurrentRuns(t *testing.T) {
+	testenv.Isolate(t)
+	db := seedTendersDB(t, nil)
+	st, err := store.OpenWithContext(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another run claimed A and B after this run's seen-state pre-filter.
+	if _, err := st.ClaimLeads(context.Background(), []store.LeadKey{leadStoreKey("A GmbH", "DEU"), leadStoreKey("B GmbH", "DEU")}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	rows := []leadRow{
+		{WinnerName: "A GmbH", WinnerCountry: "DEU"},
+		{WinnerName: "B GmbH", WinnerCountry: "DEU"},
+		{WinnerName: "C GmbH", WinnerCountry: "DEU"},
+		{WinnerName: "C GmbH", WinnerCountry: "DEU", NoticeID: "second-lot"},
+		{WinnerName: "D GmbH", WinnerCountry: "DEU"},
+	}
+	cmd := RootCmd()
+	cmd.SetContext(context.Background())
+	got, lost, err := claimUpTo(cmd, db, rows, 2, func(l leadRow) store.LeadKey { return leadStoreKey(l.WinnerName, l.WinnerCountry) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lost != 2 || len(got) != 2 || got[0].WinnerName != "C GmbH" || got[1].WinnerName != "C GmbH" {
+		t.Fatalf("want both C rows after refilling past A and B, got lost=%d rows=%+v", lost, got)
+	}
+	got, _, err = claimUpTo(cmd, db, rows, 0, func(l leadRow) store.LeadKey { return leadStoreKey(l.WinnerName, l.WinnerCountry) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].WinnerName != "D GmbH" {
+		t.Fatalf("second run should get only D, got %+v", got)
 	}
 }

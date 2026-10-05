@@ -111,26 +111,17 @@ never return the same company twice.`,
 
 			if groupBy == "company" {
 				grouped := groupLeadsByCompany(leads)
-				if limit > 0 && len(grouped) > limit {
-					grouped = grouped[:limit]
-				}
 				if newOnly {
-					keys := make([]store.LeadKey, 0, len(grouped))
-					for _, c := range grouped {
-						keys = append(keys, leadStoreKey(c.WinnerName, c.WinnerCountry))
-					}
-					claimed, err := claimLeads(cmd, resolveTendersDB(dbPath), keys)
+					var lost int
+					grouped, lost, err = claimUpTo(cmd, resolveTendersDB(dbPath), grouped, limit, func(c companyLead) store.LeadKey {
+						return leadStoreKey(c.WinnerName, c.WinnerCountry)
+					})
 					if err != nil {
 						return err
 					}
-					kept := grouped[:0]
-					for i, c := range grouped {
-						if claimed[keys[i]] {
-							kept = append(kept, c)
-						}
-					}
-					noteConcurrentClaims(cmd, len(grouped)-len(kept))
-					grouped = kept
+					noteConcurrentClaims(cmd, lost)
+				} else if limit > 0 && len(grouped) > limit {
+					grouped = grouped[:limit]
 				}
 				if !wantsHumanTable(cmd.OutOrStdout(), flags) {
 					return printJSONFiltered(cmd.OutOrStdout(), grouped, flags)
@@ -146,29 +137,17 @@ never return the same company twice.`,
 				}
 				return tw.Flush()
 			}
-			if limit > 0 && len(leads) > limit {
-				leads = leads[:limit]
-			}
 			if newOnly {
-				keys := make([]store.LeadKey, 0, len(leads))
-				for _, l := range leads {
-					keys = append(keys, leadStoreKey(l.WinnerName, l.WinnerCountry))
-				}
-				claimed, err := claimLeads(cmd, resolveTendersDB(dbPath), keys)
+				var lost int
+				leads, lost, err = claimUpTo(cmd, resolveTendersDB(dbPath), leads, limit, func(l leadRow) store.LeadKey {
+					return leadStoreKey(l.WinnerName, l.WinnerCountry)
+				})
 				if err != nil {
 					return err
 				}
-				kept := leads[:0]
-				lost := map[store.LeadKey]bool{}
-				for i, l := range leads {
-					if claimed[keys[i]] {
-						kept = append(kept, l)
-					} else {
-						lost[keys[i]] = true
-					}
-				}
-				noteConcurrentClaims(cmd, len(lost))
-				leads = kept
+				noteConcurrentClaims(cmd, lost)
+			} else if limit > 0 && len(leads) > limit {
+				leads = leads[:limit]
 			}
 			if !wantsHumanTable(cmd.OutOrStdout(), flags) {
 				return printJSONFiltered(cmd.OutOrStdout(), leads, flags)
@@ -230,23 +209,53 @@ func dropSeenLeads(cmd *cobra.Command, dbPath string, leads []leadRow) ([]leadRo
 	return out, skipped, nil
 }
 
-// claimLeads records the companies this run is about to return and reports
-// which ones it claimed. Only the rows that survived --limit are claimed, so
-// a --limit cut never hides leads from later --new-only runs. The claim is
-// one write transaction with insert-if-absent per company: when another
-// --new-only run claimed a company after this run's SeenLeads pre-filter,
-// the company maps to false and this run drops it.
-func claimLeads(cmd *cobra.Command, dbPath string, keys []store.LeadKey) (map[store.LeadKey]bool, error) {
+// claimUpTo walks the unseen candidates in order and claims their companies
+// in batches until limit rows are kept (limit <= 0 keeps every candidate).
+// Rows of a company another --new-only run claimed first are dropped and the
+// freed slots are refilled from the next candidates, so concurrent digests
+// split the companies without under-filling each other. Rows of a company
+// this run already claimed are kept without a second claim.
+func claimUpTo[T any](cmd *cobra.Command, dbPath string, candidates []T, limit int, key func(T) store.LeadKey) ([]T, int, error) {
 	st, err := store.OpenWithContext(cmd.Context(), dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("opening local store for --new-only: %w", err)
+		return nil, 0, fmt.Errorf("opening local store for --new-only: %w", err)
 	}
 	defer st.Close()
-	claimed, err := st.ClaimLeads(cmd.Context(), keys)
-	if err != nil {
-		return nil, fmt.Errorf("recording lead seen-state: %w", err)
+	kept := make([]T, 0, len(candidates))
+	mine := map[store.LeadKey]bool{}
+	lostKeys := map[store.LeadKey]bool{}
+	next := 0
+	for next < len(candidates) && (limit <= 0 || len(kept) < limit) {
+		want := len(candidates) - next
+		if limit > 0 && limit-len(kept) < want {
+			want = limit - len(kept)
+		}
+		batch := candidates[next : next+want]
+		next += want
+		toClaim := make([]store.LeadKey, 0, len(batch))
+		for _, c := range batch {
+			if k := key(c); !mine[k] && !lostKeys[k] {
+				toClaim = append(toClaim, k)
+			}
+		}
+		claimed, err := st.ClaimLeads(cmd.Context(), toClaim)
+		if err != nil {
+			return nil, 0, fmt.Errorf("recording lead seen-state: %w", err)
+		}
+		for _, k := range toClaim {
+			if claimed[k] {
+				mine[k] = true
+			} else {
+				lostKeys[k] = true
+			}
+		}
+		for _, c := range batch {
+			if mine[key(c)] && (limit <= 0 || len(kept) < limit) {
+				kept = append(kept, c)
+			}
+		}
 	}
-	return claimed, nil
+	return kept, len(lostKeys), nil
 }
 
 func noteConcurrentClaims(cmd *cobra.Command, n int) {
